@@ -40,10 +40,11 @@ Caveats:
 Requirements:
 * For cuDSS support an NVIDIA GPU of Pascal generation and newer is required
 * Only linux is currently supported
-
-If in venv
+* conda (recommended) or pip venv virtual environment. ***WARNING: UV is currently failing***.
 
 ```bash
+conda create -n spineax pip
+conda activate spineax
 pip install git+ssh://git@github.com/johnviljoen/spineax.git
 ```
 
