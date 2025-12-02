@@ -6,6 +6,7 @@ from jax.interpreters import mlir, batching
 import jax.numpy as jnp
 from jaxtyping import Array
 import numpy as np
+import equinox as eqx
 
 # Force JAX to initialize CUDA context BEFORE importing my C++ functions!!!!!!!!
 jax.devices()
@@ -527,11 +528,25 @@ def general_solve_vmap(
     batch_axes: tuple[int | None, int | None],  # [b_values, csr_values]
     **kwargs                                    # static params
 ) -> Array:
-    
+
     b_values, csr_values, csr_offsets, csr_columns = vector_arg_values
     a_b, a_val, a_off, a_col = batch_axes
 
-    # guards
+    # Handle spurious batch axes on sparsity patterns.
+    # This happens when the solve is inside a jax.lax.switch that gets vmapped -
+    # JAX broadcasts all branch inputs to have batch dimensions, even constants.
+    # Since sparsity patterns are the same across all batch elements, extract first.
+    if a_off is not None:
+        csr_offsets = jax.lax.index_in_dim(csr_offsets, 0, axis=a_off, keepdims=False)
+        a_off = None
+    if a_col is not None:
+        csr_columns = jax.lax.index_in_dim(csr_columns, 0, axis=a_col, keepdims=False)
+        a_col = None
+
+    # Update vector_arg_values with the corrected sparsity patterns
+    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns)
+
+    # guards (these should never trigger now since we handle spurious batch axes above)
     if any(ax is not None for ax in (a_off, a_col)):
         raise NotImplementedError("don't support batches of heterogeneous sparsity patterns yet (its coming tho...)")
 
@@ -586,6 +601,15 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
     """Handle vmap of already-batched solve"""
     b_values, csr_values, csr_offsets, csr_columns = vector_arg_values
     a_b, a_val, a_off, a_col = batch_axes
+
+    # Handle spurious batch axes on sparsity patterns (same fix as general_solve_vmap)
+    if a_off is not None:
+        csr_offsets = jax.lax.index_in_dim(csr_offsets, 0, axis=a_off, keepdims=False)
+        a_off = None
+    if a_col is not None:
+        csr_columns = jax.lax.index_in_dim(csr_columns, 0, axis=a_col, keepdims=False)
+        a_col = None
+    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns)
 
     if any(ax is not None for ax in (a_off, a_col)):
         raise NotImplementedError("don't support batches of heterogeneous sparsity patterns yet (its coming tho...)")
@@ -655,19 +679,29 @@ batching.primitive_batchers[solve_pbatch_f32_p] = solve_batch_vmap
 batching.primitive_batchers[solve_pbatch_f64_p] = solve_batch_vmap
 
 # create python side composable class to ensure validity of the columns and offsets
-class CuDSSSolver:
-    def __init__(self, csr_offsets, csr_columns, device_id, mtype_id, mview_id):
+class CuDSSSolver(eqx.Module):
+    """Sparse linear solver wrapper that marks sparsity pattern as static for vmap."""
+    csr_offsets: Array = eqx.field(static=True)
+    csr_columns: Array = eqx.field(static=True)
+    device_id: int = eqx.field(static=True)
+    mtype_id: int = eqx.field(static=True)
+    mview_id: int = eqx.field(static=True)
 
-        self._solve_fn = ft.partial(solve,
-            csr_offsets=csr_offsets,
-            csr_columns=csr_columns,
-            device_id=device_id,
-            mtype_id=mtype_id,
-            mview_id=mview_id
-        )
+    def __init__(self, csr_offsets, csr_columns, device_id, mtype_id, mview_id):
+        self.csr_offsets = csr_offsets
+        self.csr_columns = csr_columns
+        self.device_id = device_id
+        self.mtype_id = mtype_id
+        self.mview_id = mview_id
 
     def __call__(self, b, csr_values):
-        return self._solve_fn(b, csr_values)   
+        return solve(b, csr_values,
+            csr_offsets=self.csr_offsets,
+            csr_columns=self.csr_columns,
+            device_id=self.device_id,
+            mtype_id=self.mtype_id,
+            mview_id=self.mview_id
+        )   
 
 if __name__ == "__main__":
 
