@@ -13,7 +13,15 @@ import jax.experimental.sparse as jsparse
 jax.devices()
 
 # Import the functions that return pointers from our compiled C++
-from spineax import single_solve, batch_solve, pbatch_solve
+from spineax import single_solve, batch_solve
+
+# pbatch_solve is optional - requires CUDA kernel compilation which may have version issues
+try:
+    from spineax import pbatch_solve
+    _PBATCH_AVAILABLE = True
+except ImportError:
+    pbatch_solve = None
+    _PBATCH_AVAILABLE = False
 
 # primitives ===================================================================
 # single
@@ -316,24 +324,25 @@ mlir.register_lowering(solve_batch_c64_p, solve_batch_c64_low)
 solve_batch_c128_low = mlir.lower_fun(solve_batch_c128_impl, multiple_results=True)
 mlir.register_lowering(solve_batch_c128_p, solve_batch_c128_low)
 
-# psuedo batch
-jax.ffi.register_ffi_target("solve_pbatch_f32", pbatch_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_f32", pbatch_solve.type_id_f32(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_f64", pbatch_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_f64", pbatch_solve.type_id_f64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_c64", pbatch_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_c64", pbatch_solve.type_id_c64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_c128", pbatch_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_c128", pbatch_solve.type_id_c128(), platform="CUDA")
+# psuedo batch (optional - may not be available due to CUDA kernel compilation issues)
+if _PBATCH_AVAILABLE:
+    jax.ffi.register_ffi_target("solve_pbatch_f32", pbatch_solve.handler_f32(), platform="CUDA")
+    jax.ffi.register_ffi_type_id("solve_pbatch_f32", pbatch_solve.type_id_f32(), platform="CUDA")
+    jax.ffi.register_ffi_target("solve_pbatch_f64", pbatch_solve.handler_f64(), platform="CUDA")
+    jax.ffi.register_ffi_type_id("solve_pbatch_f64", pbatch_solve.type_id_f64(), platform="CUDA")
+    jax.ffi.register_ffi_target("solve_pbatch_c64", pbatch_solve.handler_c64(), platform="CUDA")
+    jax.ffi.register_ffi_type_id("solve_pbatch_c64", pbatch_solve.type_id_c64(), platform="CUDA")
+    jax.ffi.register_ffi_target("solve_pbatch_c128", pbatch_solve.handler_c128(), platform="CUDA")
+    jax.ffi.register_ffi_type_id("solve_pbatch_c128", pbatch_solve.type_id_c128(), platform="CUDA")
 
-solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
-solve_pbatch_f64_low = mlir.lower_fun(solve_pbatch_f64_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_f64_p, solve_pbatch_f64_low)
-solve_pbatch_c64_low = mlir.lower_fun(solve_pbatch_c64_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_c64_p, solve_pbatch_c64_low)
-solve_pbatch_c128_low = mlir.lower_fun(solve_pbatch_c128_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_c128_p, solve_pbatch_c128_low)
+    solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
+    solve_pbatch_f64_low = mlir.lower_fun(solve_pbatch_f64_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_f64_p, solve_pbatch_f64_low)
+    solve_pbatch_c64_low = mlir.lower_fun(solve_pbatch_c64_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_c64_p, solve_pbatch_c64_low)
+    solve_pbatch_c128_low = mlir.lower_fun(solve_pbatch_c128_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_c128_p, solve_pbatch_c128_low)
 
 # abstract evaluations =========================================================
 @solve_single_f32_p.def_abstract_eval
@@ -500,6 +509,11 @@ def pbatch_solve(
         mtype_id,
         mview_id
     ):
+    if not _PBATCH_AVAILABLE:
+        raise ImportError(
+            "pbatch_solve is not available. This requires CUDA kernel compilation "
+            "which may have version compatibility issues. Use single_solve or batch_solve instead."
+        )
     if csr_values.dtype == jnp.float32:
         print(f"solving with float32")
         solver = solve_pbatch_f32_p

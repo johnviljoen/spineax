@@ -188,9 +188,10 @@ nanobind_add_module(batch_solve NOMINSIZE
 )
 
 # pseudo batch (enable features lacking in normal batch whilst also solving a batch)
-nanobind_add_module(pbatch_solve NOMINSIZE 
-  src/spineax/cudss/pseudo_batch_solve.cu
-)
+# DISABLED: Requires CUDA kernel compilation which has version mismatch issues
+# nanobind_add_module(pbatch_solve NOMINSIZE
+#   src/spineax/cudss/pseudo_batch_solve.cu
+# )
 
 # single solve and Return Everything (return all data that cuDSS has)
 nanobind_add_module(single_solve_re NOMINSIZE 
@@ -218,7 +219,6 @@ endif()
 
 foreach(TARGET
   batch_solve
-  pbatch_solve
   single_solve
   single_solve_re
 )
@@ -251,12 +251,12 @@ foreach(TARGET
     )
 endforeach()
 
+# Note: pbatch_solve disabled due to CUDA kernel version mismatch
 install(
-  TARGETS 
+  TARGETS
     batch_solve
-    pbatch_solve
-    single_solve 
+    single_solve
     single_solve_re
-  LIBRARY 
+  LIBRARY
   DESTINATION spineax
 )
