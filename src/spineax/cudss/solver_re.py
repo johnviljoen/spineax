@@ -96,15 +96,26 @@ def general_single_solve_impl(
 
 # registrations and lowerings ==================================================
 
+# Helper for register_ffi_type_id - not supported in jaxlib > 0.4.31
+def _try_register_type_id(name, type_id, platform):
+    """Try to register FFI type ID, skip if not supported (jaxlib > 0.4.31)."""
+    try:
+        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    except ValueError as e:
+        if "not supported" in str(e):
+            pass  # Silently skip - stateful FFI not available in this jaxlib version
+        else:
+            raise
+
 # single
 jax.ffi.register_ffi_target("solve_single_f32_re", single_solve_re.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f32_re", single_solve_re.type_id_f32(), platform="CUDA")
+_try_register_type_id("solve_single_f32_re", single_solve_re.type_id_f32(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_f64_re", single_solve_re.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f64_re", single_solve_re.type_id_f64(), platform="CUDA")
+_try_register_type_id("solve_single_f64_re", single_solve_re.type_id_f64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_c64_re", single_solve_re.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c64_re", single_solve_re.type_id_c64(), platform="CUDA")
+_try_register_type_id("solve_single_c64_re", single_solve_re.type_id_c64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_c128_re", single_solve_re.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c128_re", single_solve_re.type_id_c128(), platform="CUDA")
+_try_register_type_id("solve_single_c128_re", single_solve_re.type_id_c128(), platform="CUDA")
 
 solve_single_f32_re_low = mlir.lower_fun(solve_single_f32_re_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_re_p, solve_single_f32_re_low)

@@ -286,15 +286,26 @@ def general_pbatch_solve_impl(
 
 # registrations and lowerings ==================================================
 
+# Helper for register_ffi_type_id - not supported in jaxlib > 0.4.31
+def _try_register_type_id(name, type_id, platform):
+    """Try to register FFI type ID, skip if not supported (jaxlib > 0.4.31)."""
+    try:
+        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    except ValueError as e:
+        if "not supported" in str(e):
+            pass  # Silently skip - stateful FFI not available in this jaxlib version
+        else:
+            raise
+
 # single
 jax.ffi.register_ffi_target("solve_single_f32", single_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f32", single_solve.type_id_f32(), platform="CUDA")
+_try_register_type_id("solve_single_f32", single_solve.type_id_f32(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_f64", single_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f64", single_solve.type_id_f64(), platform="CUDA")
+_try_register_type_id("solve_single_f64", single_solve.type_id_f64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_c64", single_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c64", single_solve.type_id_c64(), platform="CUDA")
+_try_register_type_id("solve_single_c64", single_solve.type_id_c64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_single_c128", single_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c128", single_solve.type_id_c128(), platform="CUDA")
+_try_register_type_id("solve_single_c128", single_solve.type_id_c128(), platform="CUDA")
 
 solve_single_f32_low = mlir.lower_fun(solve_single_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_p, solve_single_f32_low)
@@ -307,13 +318,13 @@ mlir.register_lowering(solve_single_c128_p, solve_single_c128_low)
 
 # batch
 jax.ffi.register_ffi_target("solve_batch_f32", batch_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_f32", batch_solve.type_id_f32(), platform="CUDA")
+_try_register_type_id("solve_batch_f32", batch_solve.type_id_f32(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_batch_f64", batch_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_f64", batch_solve.type_id_f64(), platform="CUDA")
+_try_register_type_id("solve_batch_f64", batch_solve.type_id_f64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_batch_c64", batch_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_c64", batch_solve.type_id_c64(), platform="CUDA")
+_try_register_type_id("solve_batch_c64", batch_solve.type_id_c64(), platform="CUDA")
 jax.ffi.register_ffi_target("solve_batch_c128", batch_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_c128", batch_solve.type_id_c128(), platform="CUDA")
+_try_register_type_id("solve_batch_c128", batch_solve.type_id_c128(), platform="CUDA")
 
 solve_batch_f32_low = mlir.lower_fun(solve_batch_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_batch_f32_p, solve_batch_f32_low)
@@ -327,13 +338,13 @@ mlir.register_lowering(solve_batch_c128_p, solve_batch_c128_low)
 # psuedo batch (optional - may not be available due to CUDA kernel compilation issues)
 if _PBATCH_AVAILABLE:
     jax.ffi.register_ffi_target("solve_pbatch_f32", pbatch_solve.handler_f32(), platform="CUDA")
-    jax.ffi.register_ffi_type_id("solve_pbatch_f32", pbatch_solve.type_id_f32(), platform="CUDA")
+    _try_register_type_id("solve_pbatch_f32", pbatch_solve.type_id_f32(), platform="CUDA")
     jax.ffi.register_ffi_target("solve_pbatch_f64", pbatch_solve.handler_f64(), platform="CUDA")
-    jax.ffi.register_ffi_type_id("solve_pbatch_f64", pbatch_solve.type_id_f64(), platform="CUDA")
+    _try_register_type_id("solve_pbatch_f64", pbatch_solve.type_id_f64(), platform="CUDA")
     jax.ffi.register_ffi_target("solve_pbatch_c64", pbatch_solve.handler_c64(), platform="CUDA")
-    jax.ffi.register_ffi_type_id("solve_pbatch_c64", pbatch_solve.type_id_c64(), platform="CUDA")
+    _try_register_type_id("solve_pbatch_c64", pbatch_solve.type_id_c64(), platform="CUDA")
     jax.ffi.register_ffi_target("solve_pbatch_c128", pbatch_solve.handler_c128(), platform="CUDA")
-    jax.ffi.register_ffi_type_id("solve_pbatch_c128", pbatch_solve.type_id_c128(), platform="CUDA")
+    _try_register_type_id("solve_pbatch_c128", pbatch_solve.type_id_c128(), platform="CUDA")
 
     solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
     mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
