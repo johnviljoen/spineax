@@ -286,15 +286,25 @@ def general_pbatch_solve_impl(
 
 # registrations and lowerings ==================================================
 
-# Check if old FFI API (jaxlib <= 0.4.31) is available
-# Old API has register_ffi_type_id, new API (jaxlib >= 0.5.0) doesn't
-_OLD_FFI_API = hasattr(jax.ffi, 'register_ffi_type_id')
+# Check JAX FFI API version based on jaxlib extension version
+# Version 381+ has register_ffi_type, earlier versions use register_ffi_type_id
+try:
+    from jax._src.lib import jaxlib_extension_version
+    _NEW_FFI_API = jaxlib_extension_version >= 381
+except ImportError:
+    _NEW_FFI_API = False
 
 def _register_ffi_handler(name, handler_fn, state_type_fn, type_id_fn, platform):
     """Register FFI handler, supporting both old and new jaxlib APIs."""
     handler_dict = handler_fn()
-    if _OLD_FFI_API:
-        # Old API (jaxlib <= 0.4.31): register handler and type separately
+    if _NEW_FFI_API:
+        # New API (jaxlib >= 0.5.0 / extension version 381+):
+        # Use register_ffi_type for state type, then register_ffi_target for handler
+        state_type_dict = state_type_fn()
+        jax.ffi.register_ffi_type(name, state_type_dict, platform=platform)
+        jax.ffi.register_ffi_target(name, handler_dict, platform=platform)
+    else:
+        # Old API (jaxlib <= 0.4.31): register handler and type_id separately
         jax.ffi.register_ffi_target(name, handler_dict, platform=platform)
         try:
             jax.ffi.register_ffi_type_id(name, type_id_fn(), platform=platform)
@@ -303,11 +313,6 @@ def _register_ffi_handler(name, handler_fn, state_type_fn, type_id_fn, platform)
                 pass  # Skip if not supported
             else:
                 raise
-    else:
-        # New API (jaxlib >= 0.5.0): include state_type in handler dict
-        state_type_dict = state_type_fn()
-        handler_dict["state_type"] = state_type_dict
-        jax.ffi.register_ffi_target(name, handler_dict, platform=platform)
 
 # single
 _register_ffi_handler("solve_single_f32", single_solve.handler_f32, single_solve.state_type_f32, single_solve.type_id_f32, platform="CUDA")
