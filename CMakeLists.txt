@@ -236,6 +236,12 @@ foreach(TARGET
         cublas_from_python
     )
 
+    # Suppress warnings from XLA FFI headers that have control flow issues
+    # These are in jaxlib's XLA headers, not in spineax code
+    target_compile_options(${TARGET} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-return-type -Wno-attributes>
+    )
+    
     # Add RPATH so the .so can find its dependencies
     # Use $ORIGIN to make paths relative to the installed module location
     set_target_properties(${TARGET} PROPERTIES
