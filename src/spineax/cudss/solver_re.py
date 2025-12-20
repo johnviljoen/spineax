@@ -96,16 +96,16 @@ def general_single_solve_impl(
 
 # registrations and lowerings ==================================================
 
-# Check if new FFI API is available (jaxlib >= 0.5.0)
-_NEW_FFI_API = hasattr(jax.ffi, 'register_ffi_type')
+# Check if old FFI API (jaxlib <= 0.4.31) is available
+# Old API has register_ffi_type_id, new API (jaxlib >= 0.5.0) doesn't
+_OLD_FFI_API = hasattr(jax.ffi, 'register_ffi_type_id')
 
-def _register_ffi_state(name, state_type_fn, type_id_fn, platform):
-    """Register FFI state type, supporting both old and new jaxlib APIs."""
-    if _NEW_FFI_API:
-        # New API (jaxlib >= 0.5.0): use register_ffi_type with state_type dict
-        jax.ffi.register_ffi_type(name, state_type_fn(), platform=platform)
-    else:
-        # Old API (jaxlib <= 0.4.31): use register_ffi_type_id
+def _register_ffi_handler(name, handler_fn, state_type_fn, type_id_fn, platform):
+    """Register FFI handler, supporting both old and new jaxlib APIs."""
+    handler_dict = handler_fn()
+    if _OLD_FFI_API:
+        # Old API (jaxlib <= 0.4.31): register handler and type separately
+        jax.ffi.register_ffi_target(name, handler_dict, platform=platform)
         try:
             jax.ffi.register_ffi_type_id(name, type_id_fn(), platform=platform)
         except ValueError as e:
@@ -113,16 +113,17 @@ def _register_ffi_state(name, state_type_fn, type_id_fn, platform):
                 pass  # Skip if not supported
             else:
                 raise
+    else:
+        # New API (jaxlib >= 0.5.0): include state_type in handler dict
+        state_type_dict = state_type_fn()
+        handler_dict["state_type"] = state_type_dict
+        jax.ffi.register_ffi_target(name, handler_dict, platform=platform)
 
 # single
-jax.ffi.register_ffi_target("solve_single_f32_re", single_solve_re.handler_f32(), platform="CUDA")
-_register_ffi_state("solve_single_f32_re", single_solve_re.state_type_f32, single_solve_re.type_id_f32, platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_f64_re", single_solve_re.handler_f64(), platform="CUDA")
-_register_ffi_state("solve_single_f64_re", single_solve_re.state_type_f64, single_solve_re.type_id_f64, platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c64_re", single_solve_re.handler_c64(), platform="CUDA")
-_register_ffi_state("solve_single_c64_re", single_solve_re.state_type_c64, single_solve_re.type_id_c64, platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c128_re", single_solve_re.handler_c128(), platform="CUDA")
-_register_ffi_state("solve_single_c128_re", single_solve_re.state_type_c128, single_solve_re.type_id_c128, platform="CUDA")
+_register_ffi_handler("solve_single_f32_re", single_solve_re.handler_f32, single_solve_re.state_type_f32, single_solve_re.type_id_f32, platform="CUDA")
+_register_ffi_handler("solve_single_f64_re", single_solve_re.handler_f64, single_solve_re.state_type_f64, single_solve_re.type_id_f64, platform="CUDA")
+_register_ffi_handler("solve_single_c64_re", single_solve_re.handler_c64, single_solve_re.state_type_c64, single_solve_re.type_id_c64, platform="CUDA")
+_register_ffi_handler("solve_single_c128_re", single_solve_re.handler_c128, single_solve_re.state_type_c128, single_solve_re.type_id_c128, platform="CUDA")
 
 solve_single_f32_re_low = mlir.lower_fun(solve_single_f32_re_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_re_p, solve_single_f32_re_low)
