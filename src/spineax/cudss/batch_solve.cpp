@@ -341,6 +341,13 @@ DEFINE_CUDSS_FFI_HANDLERS(c128, ffi::C128);
     m.def("type_id_" #TypeName, []() { \
         return nb::capsule(reinterpret_cast<void*>(&CudssBatchState<DataType>::id)); \
     }); \
+    m.def("state_type_" #TypeName, []() { \
+        static auto kTypeInfo = ffi::MakeTypeInfo<CudssBatchState<DataType>>(); \
+        nb::dict d; \
+        d["type_id"] = nb::capsule(reinterpret_cast<void*>(&CudssBatchState<DataType>::id)); \
+        d["type_info"] = nb::capsule(reinterpret_cast<void*>(&kTypeInfo)); \
+        return d; \
+    }); \
     m.def("handler_" #TypeName, []() { \
         nb::dict d; \
         d["instantiate"] = nb::capsule(reinterpret_cast<void*>(kCudssInstantiate##TypeName)); \
