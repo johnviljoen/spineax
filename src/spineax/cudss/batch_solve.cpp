@@ -93,27 +93,32 @@ struct CudssBatchState {
     cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;
     cudssIndexBase_t base = CUDSS_BASE_ZERO;
     cudssStatus_t status = CUDSS_STATUS_SUCCESS;
-    int64_t n;
-    int64_t nnz;
-    int64_t nrhs;
-    int32_t ubatch_size; // this must be int32_t or cuDSS will error
+    cudaStream_t last_stream = nullptr; // track stream for synchronization
+    int64_t n = 0;
+    int64_t nnz = 0;
+    int64_t nrhs = 0;
+    int32_t ubatch_size = 0; // this must be int32_t or cuDSS will error
     int64_t call_count = 0; // necessary for detecting if we need further instantiation in execution stage
-    size_t sizeWritten;
+    size_t sizeWritten = 0;
     cudaDataType cuda_dtype = get_cuda_data_type<T>();
 
     // this is literally only for debugging
     using native_dtype = typename get_native_data_type<T>::type;
 
     ~CudssBatchState() {
-        // TODO: Fix destructor - currently causes double free on CUDA 13 / cuDSS 0.7
-        // if (handle) {
-        //     cudssMatrixDestroy(A);
-        //     cudssMatrixDestroy(b);
-        //     cudssMatrixDestroy(x);
-        //     cudssDataDestroy(handle, data);
-        //     cudssConfigDestroy(config);
-        //     cudssDestroy(handle);
-        // }
+        if (handle) {
+            // Synchronize with the last stream before destroying resources
+            if (last_stream) {
+                cudaStreamSynchronize(last_stream);
+            }
+            // CuDSS destruction
+            cudssMatrixDestroy(A);
+            cudssMatrixDestroy(b);
+            cudssMatrixDestroy(x);
+            cudssDataDestroy(handle, data);
+            cudssConfigDestroy(config);
+            cudssDestroy(handle);
+        }
     }
 };
 
@@ -207,7 +212,9 @@ static ffi::Error CudssExecute(
     const int64_t mview_id                      // {0: full, 1: triu, 2: tril}
 ) {
     // printf("in execute \n");
-    // cudaStreamSynchronize(stream);
+    // Track stream for cleanup synchronization
+    state->last_stream = stream;
+
     if (state->call_count == 0) {
 
         // CuDSS setup
