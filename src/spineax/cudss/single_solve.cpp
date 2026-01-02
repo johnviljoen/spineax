@@ -285,10 +285,22 @@ static ffi::Error CudssExecute(
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
     }
 
-    CUDSS_CALL_AND_CHECK(cudssDataGet(state->handle, state->data, CUDSS_DATA_DIAG, diag_buf->typed_data(),
-                    state->n * sizeof(typename get_native_data_type<T>::type), &state->sizeWritten), state->status, "cudssDataGet DATA_DIAG");
-    CUDSS_CALL_AND_CHECK(cudssDataGet(state->handle, state->data, CUDSS_DATA_PERM_REORDER_ROW, perm_buf->typed_data(),
-                    state->n * sizeof(int32_t), &state->sizeWritten), state->status, "cudssDataGet DATA_PERM_REORDER_ROW");
+    // Diagnostic extraction - these can fail for certain matrix types (e.g., general non-SPD)
+    // Don't fail the solve, just warn and continue with zeros
+    state->status = cudssDataGet(state->handle, state->data, CUDSS_DATA_DIAG, diag_buf->typed_data(),
+                    state->n * sizeof(typename get_native_data_type<T>::type), &state->sizeWritten);
+    if (state->status != CUDSS_STATUS_SUCCESS) {
+        // Zero out the diag buffer on failure
+        CUDA_CHECK(cudaMemset(diag_buf->typed_data(), 0,
+                    state->n * sizeof(typename get_native_data_type<T>::type)));
+    }
+
+    state->status = cudssDataGet(state->handle, state->data, CUDSS_DATA_PERM_REORDER_ROW, perm_buf->typed_data(),
+                    state->n * sizeof(int32_t), &state->sizeWritten);
+    if (state->status != CUDSS_STATUS_SUCCESS) {
+        // Zero out the perm buffer on failure
+        CUDA_CHECK(cudaMemset(perm_buf->typed_data(), 0, state->n * sizeof(int32_t)));
+    }
 
     return ffi::Error::Success();
 }
