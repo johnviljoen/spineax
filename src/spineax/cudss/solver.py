@@ -132,13 +132,14 @@ def solve_single_c128_impl(*args, **kwargs):
     return general_single_solve_impl("solve_single_c128", *args, **kwargs)
 
 def general_single_solve_impl(
-        name, 
-        b_values, 
-        csr_values, 
+        name,
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
-        device_id, 
-        mtype_id, 
+        refactorize_signal,
+        device_id,
+        mtype_id,
         mview_id
     ):
 
@@ -153,11 +154,12 @@ def general_single_solve_impl(
     )
 
     x, diag, perm = call(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
-        device_id = device_id, 
+        refactorize_signal,
+        device_id = device_id,
         mtype_id = mtype_id,
         mview_id = mview_id,
     )
@@ -234,14 +236,15 @@ def solve_pbatch_c128_impl(*args, **kwargs):
     return general_pbatch_solve_impl("solve_pbatch_c128", *args, **kwargs)
 
 def general_pbatch_solve_impl(
-        name, 
-        b_values, 
-        csr_values, 
+        name,
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
+        refactorize_signal,
         batch_size,
-        device_id, 
-        mtype_id, 
+        device_id,
+        mtype_id,
         mview_id
     ):
 
@@ -256,12 +259,13 @@ def general_pbatch_solve_impl(
     )
 
     x, diag, perm = call(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
+        refactorize_signal,
         batch_size = batch_size,
-        device_id = device_id, 
+        device_id = device_id,
         mtype_id = mtype_id,
         mview_id = mview_id,
     )
@@ -337,12 +341,13 @@ mlir.register_lowering(solve_pbatch_c128_p, solve_pbatch_c128_low)
 @solve_single_c64_p.def_abstract_eval
 @solve_single_c128_p.def_abstract_eval
 def solve_aval(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
-        device_id, 
-        mtype_id, 
+        refactorize_signal,
+        device_id,
+        mtype_id,
         mview_id
     ):
     return [
@@ -374,13 +379,14 @@ def solve_batch_aval(
 @solve_pbatch_c64_p.def_abstract_eval
 @solve_pbatch_c128_p.def_abstract_eval
 def solve_pbatch_aval(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
+        refactorize_signal,
         batch_size,
-        device_id, 
-        mtype_id, 
+        device_id,
+        mtype_id,
         mview_id
     ):
     return [
@@ -397,12 +403,13 @@ def solve_pbatch_aval(
     ]
 )
 def solve(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
-        device_id, 
-        mtype_id, 
+        refactorize_signal,
+        device_id,
+        mtype_id,
         mview_id
     ):
     if csr_values.dtype == jnp.float32:
@@ -419,11 +426,12 @@ def solve(
         raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
     return solver.bind(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
-        device_id = device_id, 
+        refactorize_signal,
+        device_id = device_id,
         mtype_id = mtype_id,
         mview_id = mview_id,
     )
@@ -482,13 +490,14 @@ def batch_solve(
     ]
 )
 def pbatch_solve(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
+        refactorize_signal,
         batch_size,
-        device_id, 
-        mtype_id, 
+        device_id,
+        mtype_id,
         mview_id
     ):
     if csr_values.dtype == jnp.float32:
@@ -505,12 +514,13 @@ def pbatch_solve(
         raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
     return solver.bind(
-        b_values, 
-        csr_values, 
+        b_values,
+        csr_values,
         csr_offsets,
         csr_columns,
+        refactorize_signal,
         batch_size = batch_size,
-        device_id = device_id, 
+        device_id = device_id,
         mtype_id = mtype_id,
         mview_id = mview_id,
     )
@@ -529,35 +539,41 @@ def solve_single_c128_vmap(vector_arg_values, batch_axes, **kwargs):
 vmap_using_pseudo_batch = True
 
 def general_solve_vmap(
-    vector_arg_values: tuple[Array, Array],     # [b_values, csr_values]
-    batch_axes: tuple[int | None, int | None],  # [b_values, csr_values]
+    vector_arg_values: tuple[Array, ...],       # [b_values, csr_values, csr_offsets, csr_columns, refactorize_signal]
+    batch_axes: tuple[int | None, ...],         # batch axes for each arg
     **kwargs                                    # static params
 ) -> Array:
 
-    b_values, csr_values, csr_offsets, csr_columns = vector_arg_values
-    a_b, a_val, a_off, a_col = batch_axes
+    b_values, csr_values, csr_offsets, csr_columns, refactorize_signal = vector_arg_values
+    a_b, a_val, a_off, a_col, a_refac = batch_axes
 
-    # Handle spurious batch axes on sparsity patterns.
+    # Handle spurious batch axes on sparsity patterns and refactorize_signal.
     # This happens when the solve is inside a jax.lax.switch that gets vmapped -
     # JAX broadcasts all branch inputs to have batch dimensions, even constants.
-    # Since sparsity patterns are the same across all batch elements, extract first.
+    # Since these are the same across all batch elements, extract first.
     if a_off is not None:
         csr_offsets = jax.lax.index_in_dim(csr_offsets, 0, axis=a_off, keepdims=False)
         a_off = None
     if a_col is not None:
         csr_columns = jax.lax.index_in_dim(csr_columns, 0, axis=a_col, keepdims=False)
         a_col = None
+    if a_refac is not None:
+        refactorize_signal = jax.lax.index_in_dim(refactorize_signal, 0, axis=a_refac, keepdims=False)
+        a_refac = None
 
-    # Update vector_arg_values with the corrected sparsity patterns
-    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns)
+    # Update vector_arg_values with the corrected values
+    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns, refactorize_signal)
 
     # guards (these should never trigger now since we handle spurious batch axes above)
     if any(ax is not None for ax in (a_off, a_col)):
         raise NotImplementedError("don't support batches of heterogeneous sparsity patterns yet (its coming tho...)")
 
+    if a_refac is not None:
+        raise NotImplementedError("don't support per-element batching of refactorize_signal")
+
     if all(ax is None for ax in (a_val, a_b)):
         raise NotImplementedError("Only batched csr_values and b_values are supported right now")
-    
+
     # the non-batched path
     if a_val is None and a_b is None:
         return solve(*vector_arg_values, **kwargs), (None, None)
@@ -565,7 +581,7 @@ def general_solve_vmap(
     # if only one of the sets of values are batched
     elif a_val or a_b is None:
         raise NotImplementedError("Both csr_values and b_values must be batched")
-    
+
     # the batched path binding
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is False:
         if csr_values.dtype == jnp.float32:
@@ -592,7 +608,7 @@ def general_solve_vmap(
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
         return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
-    
+
     else:
         raise NotImplementedError("This path should not be possible")
 
@@ -604,33 +620,39 @@ batching.primitive_batchers[solve_single_c128_p] = solve_single_c128_vmap
 # vmap of vmap
 def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
     """Handle vmap of already-batched solve"""
-    b_values, csr_values, csr_offsets, csr_columns = vector_arg_values
-    a_b, a_val, a_off, a_col = batch_axes
+    b_values, csr_values, csr_offsets, csr_columns, refactorize_signal = vector_arg_values
+    a_b, a_val, a_off, a_col, a_refac = batch_axes
 
-    # Handle spurious batch axes on sparsity patterns (same fix as general_solve_vmap)
+    # Handle spurious batch axes on sparsity patterns and refactorize_signal (same fix as general_solve_vmap)
     if a_off is not None:
         csr_offsets = jax.lax.index_in_dim(csr_offsets, 0, axis=a_off, keepdims=False)
         a_off = None
     if a_col is not None:
         csr_columns = jax.lax.index_in_dim(csr_columns, 0, axis=a_col, keepdims=False)
         a_col = None
-    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns)
+    if a_refac is not None:
+        refactorize_signal = jax.lax.index_in_dim(refactorize_signal, 0, axis=a_refac, keepdims=False)
+        a_refac = None
+    vector_arg_values = (b_values, csr_values, csr_offsets, csr_columns, refactorize_signal)
 
     if any(ax is not None for ax in (a_off, a_col)):
         raise NotImplementedError("don't support batches of heterogeneous sparsity patterns yet (its coming tho...)")
 
+    if a_refac is not None:
+        raise NotImplementedError("don't support per-element batching of refactorize_signal")
+
     if a_b is None and a_val is None:
         # Not actually batching
         return batch_solve(*vector_arg_values, **kwargs), (None, None)
-    
+
     # Flatten nested batches
     batch_size1 = b_values.shape[0]
     batch_size2 = b_values.shape[1]
     total_batch = batch_size1 * batch_size2
-    
+
     b_flat = b_values.reshape(total_batch, -1)
     csr_flat = csr_values.reshape(total_batch, -1)
-    
+
     # the non-batched path
     if a_val is None and a_b is None:
         return solve(*vector_arg_values, **kwargs), (None, None)
@@ -667,15 +689,15 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
     kwargs.__delitem__("batch_size")
 
     x_flat, inertia_flat = solver.bind(
-        b_flat, csr_flat, csr_offsets, csr_columns,
-        batch_size=total_batch, 
+        b_flat, csr_flat, csr_offsets, csr_columns, refactorize_signal,
+        batch_size=total_batch,
         **kwargs
     )
-    
+
     # Reshape back
     x = x_flat.reshape(batch_size1, batch_size2, -1)
     inertia = inertia_flat.reshape(batch_size1, batch_size2, 2)
-    
+
     return (x, inertia), (0, 0)
 
 batching.primitive_batchers[solve_batch_f32_p] = solve_batch_vmap
@@ -699,10 +721,11 @@ class CuDSSSolver(eqx.Module):
         self.mtype_id = mtype_id
         self.mview_id = mview_id
 
-    def __call__(self, b, csr_values):
+    def __call__(self, b, csr_values, refactorize_signal):
         return solve(b, csr_values,
             csr_offsets=self.csr_offsets,
             csr_columns=self.csr_columns,
+            refactorize_signal=refactorize_signal,
             device_id=self.device_id,
             mtype_id=self.mtype_id,
             mview_id=self.mview_id
@@ -882,110 +905,115 @@ def analyze_diagonal_pattern():
     """)
 
 
-if __name__ == "__main__":
-    analyze_diagonal_pattern()
-    run_diagonal_tests(batch_sizes=[1, 4, 16, 64])
-
-
 # if __name__ == "__main__":
+#     analyze_diagonal_pattern()
+#     run_diagonal_tests(batch_sizes=[1, 4, 16, 64])
 
-#     jax.config.update("")
 
-#     # example usage
-#     # -------------
-#     M1 = jnp.array([
-#         [4., 0., 1., 0., 0.],
-#         [0., 3., 2., 0., 0.],
-#         [0., 0., 5., 0., 1.],
-#         [0., 0., 0., 1., 0.],
-#         [0., 0., 0., 0., 2.],
-#     ])
-#     M2 = M1 * 0.9
+if __name__ == "__main__":
 
-#     b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
-#     b2 = b1 * 1.1
 
-#     m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
-#     m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
-#     true_x1 = jnp.linalg.solve(m1, b1)
-#     true_x2 = jnp.linalg.solve(m2, b2)
+    # example usage
+    # -------------
+    M1 = jnp.array([
+        [4., 0., 1., 0., 0.],
+        [0., 3., 2., 0., 0.],
+        [0., 0., 5., 0., 1.],
+        [0., 0., 0., 1., 0.],
+        [0., 0., 0., 0., 2.],
+    ])
+    M2 = M1 * 0.9
 
-#     LHS1 = jsparse.BCSR.fromdense(M1)
-#     LHS2 = jsparse.BCSR.fromdense(M2)
-#     csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
-#     csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
+    b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
+    b2 = b1 * 1.1
 
-#     assert all(csr_offsets1 == csr_offsets2)
-#     assert all(csr_columns1 == csr_columns2)
+    m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
+    m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
+    true_x1 = jnp.linalg.solve(m1, b1)
+    true_x2 = jnp.linalg.solve(m2, b2)
 
-#     batch_size = 2
-#     offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
-#     columns_batch = jnp.vstack([csr_columns1, csr_columns2])
-#     csr_values = jnp.vstack([csr_values1, csr_values2])
-#     device_id = 0; mtype_id = 1; mview_id = 1
-#     b = jnp.vstack([b1, b2])
+    LHS1 = jsparse.BCSR.fromdense(M1)
+    LHS2 = jsparse.BCSR.fromdense(M2)
+    csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
+    csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
 
-#     # instantiate solve
-#     solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
+    assert all(csr_offsets1 == csr_offsets2)
+    assert all(csr_columns1 == csr_columns2)
 
-#     # call it - dispatches single solve by default
-#     test1, in1 = solver(b[0], csr_values[0])
+    batch_size = 2
+    offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
+    columns_batch = jnp.vstack([csr_columns1, csr_columns2])
+    csr_values = jnp.vstack([csr_values1, csr_values2])
+    device_id = 0; mtype_id = 1; mview_id = 1
+    b = jnp.vstack([b1, b2])
 
-#     # call it in vmap/jit
-#     test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+    # instantiate solve
+    solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
 
-#     # unlimited composability in jit/vmap
-#     b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
-#     csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
-#     test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+    # call it - dispatches single solve by default
+    single_solver = eqx.filter_jit(solver) # has to be filter_jitted, where vmap does not
+    test1, in1 = single_solver(b[0], csr_values[0], jnp.array([1], dtype=jnp.int32))
+    test1, in1 = single_solver(b[0], csr_values[0], refactorize_signal=jnp.array([1], dtype=jnp.int32))
+    test1, in1 = single_solver(b[0], csr_values[0], refactorize_signal=jnp.array([1], dtype=jnp.int32))
 
-#     M1 = jnp.array([
-#         [0., 0., 1., 0., 0.],
-#         [0., 0., 2., 0., 0.],
-#         [0., 0., 0., 0., 1.],
-#         [0., 0., 0., 1., 0.],
-#         [0., 0., 0., 0., 2.],
-#     ])
-#     M2 = M1 * 0.9
+    # call it in vmap/jit
+    batch_solver = jax.jit(jax.vmap(solver, in_axes=(0,0,None)))
+    test2, in2 = batch_solver(b, csr_values, jnp.array([1], dtype=jnp.int32))
+    test2, in2 = batch_solver(b, csr_values, jnp.array([1], dtype=jnp.int32))
+    test2, in2 = batch_solver(b, csr_values, jnp.array([1], dtype=jnp.int32))
 
-#     b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
-#     b2 = b1 * 1.1
+    # unlimited composability in jit/vmap
+    b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
+    csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
+    test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
 
-#     m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
-#     m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
-#     true_x1 = jnp.linalg.solve(m1, b1)
-#     true_x2 = jnp.linalg.solve(m2, b2)
+    M1 = jnp.array([
+        [0., 0., 1., 0., 0.],
+        [0., 0., 2., 0., 0.],
+        [0., 0., 0., 0., 1.],
+        [0., 0., 0., 1., 0.],
+        [0., 0., 0., 0., 2.],
+    ])
+    M2 = M1 * 0.9
 
-#     LHS1 = jsparse.BCSR.fromdense(M1)
-#     LHS2 = jsparse.BCSR.fromdense(M2)
-#     csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
-#     csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
+    b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
+    b2 = b1 * 1.1
 
-#     assert all(csr_offsets1 == csr_offsets2)
-#     assert all(csr_columns1 == csr_columns2)
+    m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
+    m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
+    true_x1 = jnp.linalg.solve(m1, b1)
+    true_x2 = jnp.linalg.solve(m2, b2)
 
-#     batch_size = 2
-#     offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
-#     columns_batch = jnp.vstack([csr_columns1, csr_columns2])
-#     csr_values = jnp.vstack([csr_values1, csr_values2])
-#     device_id = 0; mtype_id = 1; mview_id = 1
-#     b = jnp.vstack([b1, b2])
+    LHS1 = jsparse.BCSR.fromdense(M1)
+    LHS2 = jsparse.BCSR.fromdense(M2)
+    csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
+    csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
 
-#     # instantiate solve
-#     solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
+    assert all(csr_offsets1 == csr_offsets2)
+    assert all(csr_columns1 == csr_columns2)
 
-#     # call it - dispatches single solve by default
-#     test1, in1 = solver(b[0], csr_values[0])
+    batch_size = 2
+    offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
+    columns_batch = jnp.vstack([csr_columns1, csr_columns2])
+    csr_values = jnp.vstack([csr_values1, csr_values2])
+    device_id = 0; mtype_id = 1; mview_id = 1
+    b = jnp.vstack([b1, b2])
 
-#     # call it in vmap/jit
-#     test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+    # instantiate solve
+    solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
 
-#     # unlimited composability in jit/vmap
-#     b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
-#     csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
-#     test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+    # call it - dispatches single solve by default
+    test1, in1 = solver(b[0], csr_values[0])
 
-#     # see difference between dense solves and cuDSS
-#     pass
+    # call it in vmap/jit
+    test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+
+    # unlimited composability in jit/vmap
+    b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
+    csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
+    test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+
+    # see difference between dense solves and cuDSS
+    pass
 
 

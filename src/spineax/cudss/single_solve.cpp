@@ -111,6 +111,7 @@ struct CudssState {
     int64_t nrhs;
     int64_t call_count = 0; // necessary for detecting if we need further instantiation in execution stage
     size_t sizeWritten;
+    int32_t do_refactorize; // host-side flag read from traced GPU signal
     cudaDataType cuda_dtype = get_cuda_data_type<T>();
 
     // this is literally only for debugging
@@ -208,6 +209,7 @@ static ffi::Error CudssExecute(
     ffi::Buffer<T> csr_values_buf,          // the real input data that varies per solution
     ffi::Buffer<ffi::S32> offsets_buf,
     ffi::Buffer<ffi::S32> columns_buf,
+    ffi::Buffer<ffi::S32> refactorize_signal,      // whether we should refactorize within jit
     ffi::ResultBuffer<T> out_values_buf,    // the output buffer we write the answer to
     ffi::ResultBuffer<T> diag_buf,          // the output buffer we write the answer to
     ffi::ResultBuffer<ffi::S32> perm_buf,   // the output buffer we write the answer to
@@ -262,25 +264,32 @@ static ffi::Error CudssExecute(
         state->call_count++;
     }
     else {
-        printf("not first execute call\n");
         // stream can change between calls!!!
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 
-        // set the values of the matrices - different to my batched solution
-        // CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetCsrPointers(state->A,
-            offsets_buf.typed_data(), NULL,
-            columns_buf.typed_data(),
-            csr_values_buf.typed_data()), state->status, "update_pointers A");
+        // Read refactorize signal from GPU to host (cudaMemcpy is synchronous)
+        cudaMemcpy(&state->do_refactorize, refactorize_signal.typed_data(),
+                   sizeof(int32_t), cudaMemcpyDeviceToHost);
 
+        // set the values of the matrices
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
 
-        // warm solve - refactorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
-            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        // Conditionally refactorize based on traced signal
+        if (state->do_refactorize) {
+            // printf("we aRE refactorizing in single solver\n");
+            // only update A if we are refactorizing it
+            CUDSS_CALL_AND_CHECK(cudssMatrixSetCsrPointers(state->A,
+                offsets_buf.typed_data(), NULL,
+                columns_buf.typed_data(),
+                csr_values_buf.typed_data()), state->status, "update_pointers A");
 
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
+            CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION,
+                state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        }
+
+        // Always solve
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
     }
 
@@ -308,6 +317,7 @@ static ffi::Error CudssExecute(
             .Ctx<ffi::State<CudssState<DataType>>>() \
             .Arg<ffi::Buffer<DataType>>() \
             .Arg<ffi::Buffer<DataType>>() \
+            .Arg<ffi::Buffer<ffi::S32>>() \
             .Arg<ffi::Buffer<ffi::S32>>() \
             .Arg<ffi::Buffer<ffi::S32>>() \
             .Ret<ffi::Buffer<DataType>>() \

@@ -114,6 +114,7 @@ struct CudssBatchState {
     int64_t nrhs;
     int64_t call_count = 0; // necessary for detecting if we need further instantiation in execution stage
     size_t sizeWritten;
+    int32_t do_refactorize; // host-side flag read from traced GPU signal
     cudaDataType cuda_dtype = get_cuda_data_type<T>();
 
     // Cache pointer addresses to detect if sparsity pattern has changed
@@ -290,6 +291,7 @@ static ffi::Error CudssExecute(
     ffi::Buffer<T> csr_values_buf,          // the real input data that varies per solution
     ffi::Buffer<ffi::S32> offsets_buf,      // sparsity pattern row offsets
     ffi::Buffer<ffi::S32> columns_buf,      // sparsity pattern column indices
+    ffi::Buffer<ffi::S32> refactorize_signal,      // whether we should refactorize within jit
     ffi::ResultBuffer<T> out_values_buf,    // the output buffer we write the answer to
     ffi::ResultBuffer<T> diag_buf, // the output buffer for inertia [batch_size, 3]
     ffi::ResultBuffer<ffi::S32> perm_buf, // the output buffer for inertia [batch_size, 3]
@@ -388,16 +390,25 @@ static ffi::Error CudssExecute(
         }
         // else: Pointers unchanged - batched structure is still valid, skip kernel!
 
+        // Read refactorize signal from GPU to host (cudaMemcpy is synchronous)
+        cudaMemcpy(&state->do_refactorize, refactorize_signal.typed_data(),
+                   sizeof(int32_t), cudaMemcpyDeviceToHost);
+
         // Update the values pointer which changes between calls
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
 
-        // warm solve - refactorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
-            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        // Conditionally refactorize based on traced signal
+        if (state->do_refactorize) {
+            // printf("we ARE refactorizing in batch solver\n");
+            // Only update the LHS matrix IF we are refactorizing - otherwise it stays the same - along with the factorization
+            CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
+            CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION,
+                state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        }
 
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
+        // Always solve
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
 
     }
@@ -431,6 +442,7 @@ static ffi::Error CudssExecute(
             .Ctx<ffi::State<CudssBatchState<DataType>>>() \
             .Arg<ffi::Buffer<DataType>>() \
             .Arg<ffi::Buffer<DataType>>() \
+            .Arg<ffi::Buffer<ffi::S32>>() \
             .Arg<ffi::Buffer<ffi::S32>>() \
             .Arg<ffi::Buffer<ffi::S32>>() \
             .Ret<ffi::Buffer<DataType>>() \
