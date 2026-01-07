@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 import numpy as np
 import equinox as eqx
+import jax.experimental.sparse as jsparse
 
 # Force JAX to initialize CUDA context BEFORE importing my C++ functions!!!!!!!!
 jax.devices()
@@ -55,8 +56,12 @@ def compute_inertia_from_diag_perm(diag, perm, batch_size, matrix_dim):
     # cuDSS pivoting threshold seems to be 1e-13. everything above this on
     # plus or minus side seems to reliably indicate that particular inertia value.
     threshold = 1e-13
-    positive = jnp.sum(out > threshold, axis=1)
-    negative = jnp.sum(out < -threshold, axis=1)
+    positive = jnp.sum(out >= threshold, axis=1)
+    negative = jnp.sum(out <= -threshold, axis=1)
+
+    # jax.debug.print("diag reordered values: {x}", x=out)
+    # jax.debug.print("positive: {x}", x=positive)
+    # jax.debug.print("negative: {x}", x=negative)
 
     return jnp.stack([positive, negative], axis=1, dtype=jnp.int32)
 
@@ -264,7 +269,7 @@ def general_pbatch_solve_impl(
     # Compute inertia instead of returning diag and perm
     matrix_dim = b_values.shape[1]  # Assuming b_values shape is (batch_size, n)
     inertia = compute_inertia_from_diag_perm(diag, perm, batch_size, matrix_dim)
-    jax.debug.print("inertia: {}", inertia)
+    # jax.debug.print("inertia: {}", inertia)
     return [x, inertia]
 
 # registrations and lowerings ==================================================
@@ -681,8 +686,8 @@ batching.primitive_batchers[solve_pbatch_f64_p] = solve_batch_vmap
 # create python side composable class to ensure validity of the columns and offsets
 class CuDSSSolver(eqx.Module):
     """Sparse linear solver wrapper that marks sparsity pattern as static for vmap."""
-    csr_offsets: Array = eqx.field(static=True)
-    csr_columns: Array = eqx.field(static=True)
+    csr_offsets: Array # = eqx.field(static=True)
+    csr_columns: Array # = eqx.field(static=True)
     device_id: int = eqx.field(static=True)
     mtype_id: int = eqx.field(static=True)
     mview_id: int = eqx.field(static=True)
@@ -701,61 +706,286 @@ class CuDSSSolver(eqx.Module):
             device_id=self.device_id,
             mtype_id=self.mtype_id,
             mview_id=self.mview_id
-        )   
+        )  
+    
+
+def make_test_matrices():
+    """Generate test matrices with known true inertias"""
+
+    tests = []
+
+    # 1. Good KKT (n_x=4, n_c=2) -> true inertia (4, 2, 0)
+    n_x, n_c = 4, 2
+    H = jnp.eye(n_x) * 3.0 + jnp.ones((n_x, n_x)) * 0.5
+    J = jax.random.normal(jax.random.PRNGKey(0), (n_c, n_x))
+    K = jnp.zeros((n_x + n_c, n_x + n_c))
+    K = K.at[:n_x, :n_x].set(H)
+    K = K.at[n_x:, :n_x].set(J)
+    K = K.at[:n_x, n_x:].set(J.T)
+    tests.append(("good_kkt_6x6", K, n_x, n_c))
+
+    # 2. KKT with singular Hessian (2 zeros in H)
+    n_x, n_c = 4, 2
+    H = jnp.eye(n_x) * 2.0
+    H = H.at[0, 0].set(0.0)
+    H = H.at[1, 1].set(0.0)
+    J = jax.random.normal(jax.random.PRNGKey(1), (n_c, n_x))
+    K = jnp.zeros((n_x + n_c, n_x + n_c))
+    K = K.at[:n_x, :n_x].set(H)
+    K = K.at[n_x:, :n_x].set(J)
+    K = K.at[:n_x, n_x:].set(J.T)
+    tests.append(("hess_singular_6x6", K, n_x, n_c))
+
+    # 3. KKT with rank-deficient Jacobian
+    n_x, n_c = 4, 3
+    H = jnp.eye(n_x) * 2.0 + jnp.ones((n_x, n_x)) * 0.1
+    J = jax.random.normal(jax.random.PRNGKey(2), (n_c, n_x))
+    J = J.at[2, :].set(J[0, :] * 2.0)  # row 2 = 2 * row 0
+    K = jnp.zeros((n_x + n_c, n_x + n_c))
+    K = K.at[:n_x, :n_x].set(H)
+    K = K.at[n_x:, :n_x].set(J)
+    K = K.at[:n_x, n_x:].set(J.T)
+    tests.append(("jac_singular_7x7", K, n_x, n_c))
+
+    # 4. CANCELLATION CASE: 2 Hessian zeros + 2 Jacobian rank deficiency
+    n_x, n_c = 6, 4
+    H = jnp.eye(n_x)
+    H = H.at[0, 0].set(0.0)
+    H = H.at[1, 1].set(0.0)
+    J = jax.random.normal(jax.random.PRNGKey(10), (n_c, n_x))
+    J = J.at[2, :].set(J[0, :] * 2.0)
+    J = J.at[3, :].set(J[1, :] * 3.0)
+    K = jnp.zeros((n_x + n_c, n_x + n_c))
+    K = K.at[:n_x, :n_x].set(H)
+    K = K.at[n_x:, :n_x].set(J)
+    K = K.at[:n_x, n_x:].set(J.T)
+    tests.append(("CANCELLATION_10x10", K, n_x, n_c))
+
+    # 5. Larger KKT
+    n_x, n_c = 10, 5
+    H = jnp.eye(n_x) * 2.0
+    H = H.at[0, 0].set(0.0)
+    H = H.at[1, 1].set(0.0)
+    J = jax.random.normal(jax.random.PRNGKey(8), (n_c, n_x))
+    J = J.at[4, :].set(J[0, :] * 2.0)  # 1 rank deficiency
+    K = jnp.zeros((n_x + n_c, n_x + n_c))
+    K = K.at[:n_x, :n_x].set(H)
+    K = K.at[n_x:, :n_x].set(J)
+    K = K.at[:n_x, n_x:].set(J.T)
+    tests.append(("large_kkt_15x15", K, n_x, n_c))
+
+    # 6. Simple indefinite (no KKT structure)
+    n = 6
+    eigs = jnp.array([3.0, 2.0, 1.0, -1.0, -2.0, -3.0])
+    Q, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(20), (n, n)))
+    K = Q @ jnp.diag(eigs) @ Q.T
+    tests.append(("indefinite_3pos_3neg", K, 3, 3))  # n_x=3 means expect 3 pos
+
+    # 7. Indefinite with zeros
+    n = 8
+    eigs = jnp.array([3.0, 2.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0])
+    Q, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(21), (n, n)))
+    K = Q @ jnp.diag(eigs) @ Q.T
+    tests.append(("indefinite_3pos_3neg_2zero", K, 3, 3))
+
+    return tests
+
+
+def compute_true_inertia(M, tol=1e-10):
+    eigs = jnp.linalg.eigvalsh(M)
+    n_pos = int((eigs > tol).sum())
+    n_neg = int((eigs < -tol).sum())
+    n_zero = int((jnp.abs(eigs) <= tol).sum())
+    return (n_pos, n_neg, n_zero), jnp.sort(eigs)
+
+
+def run_diagonal_tests(batch_sizes=[1, 4, 16]):
+    """Run tests and observe printed diagonal values"""
+
+    tests = make_test_matrices()
+
+    for name, M, n_x, n_c in tests:
+        print(f"\n{'='*70}")
+        print(f"TEST: {name}")
+        print(f"Matrix shape: {M.shape}, n_x={n_x}, n_c={n_c}")
+
+        true_inertia, eigs = compute_true_inertia(M)
+        print(f"True eigenvalues: {eigs}")
+        print(f"True inertia: {true_inertia}")
+        print(f"Expected from KKT structure: pos in [0:{n_x}], neg in [{n_x}:{n_x+n_c}]")
+        print(f"{'='*70}")
+
+        # Convert to upper triangular CSR
+        n = M.shape[0]
+        M_upper = jnp.triu(M)
+        LHS = jsparse.BCSR.fromdense(M_upper)
+        csr_offsets = LHS.indptr
+        csr_columns = LHS.indices
+        csr_values = LHS.data
+
+        b = jnp.ones(n)
+
+        # Create solver (symmetric indefinite, upper triangular)
+        solver = CuDSSSolver(csr_offsets, csr_columns, 0, 1, 1)
+
+        for batch_size in batch_sizes:
+            print(f"\n--- Batch size: {batch_size} ---")
+
+            if batch_size == 1:
+                sol, inertia = solver(b, csr_values)
+                print(f"Reported inertia: {inertia}")
+            else:
+                b_batch = jnp.stack([b] * batch_size)
+                csr_batch = jnp.stack([csr_values] * batch_size)
+                sol, inertia = jax.jit(jax.vmap(solver))(b_batch, csr_batch)
+                print(f"Reported inertia (first 4):\n{inertia[:4]}")
+
+                # Check for non-determinism
+                unique_inertias = jnp.unique(inertia, axis=0)
+                if len(unique_inertias) > 1:
+                    print(f"⚠️  NON-DETERMINISM: {len(unique_inertias)} different inertias!")
+
+            # Compare
+            if batch_size == 1:
+                reported = (int(inertia[0]), int(inertia[1]), 0)
+            else:
+                reported = (int(inertia[0, 0]), int(inertia[0, 1]), 0)
+
+            if reported[:2] == true_inertia[:2]:
+                print(f"✓ Inertia matches")
+            else:
+                print(f"✗ MISMATCH: reported={reported}, true={true_inertia}")
+
+
+def analyze_diagonal_pattern():
+    """
+    After running, look at printed diagonals and check:
+    1. Are positions [0:n_x] positive? (Hessian block)
+    2. Are positions [n_x:n_x+n_c] negative? (Constraint block)
+    3. Where are the ~1e-05 "zero" pivots located?
+    """
+    print("="*70)
+    print("DIAGONAL PATTERN ANALYSIS")
+    print("="*70)
+    print("""
+    For KKT matrix structure:
+    [H    J^T]  <- rows 0 to n_x-1      (expect POSITIVE pivots)
+    [J    0  ]  <- rows n_x to n_x+n_c-1 (expect NEGATIVE pivots)
+    
+    After running, examine the printed 'diag_reordered' values:
+    - diag[0:n_x] should be positive (Hessian block)
+    - diag[n_x:] should be negative (constraint Schur complement)
+    - Values ~1e-05 are "zeros" perturbed by cuDSS
+    
+    If negatives appear in wrong positions, cuDSS pivoting is scrambling
+    the inertia structure and cannot be trusted.
+    """)
+
 
 if __name__ == "__main__":
+    analyze_diagonal_pattern()
+    run_diagonal_tests(batch_sizes=[1, 4, 16, 64])
 
-    import jax.experimental.sparse as jsparse
 
-    # example usage
-    # -------------
-    M1 = jnp.array([
-        [4., 0., 1., 0., 0.],
-        [0., 3., 2., 0., 0.],
-        [0., 0., 5., 0., 1.],
-        [0., 0., 0., 1., 0.],
-        [0., 0., 0., 0., 2.],
-    ])
-    M2 = M1 * 0.9
+# if __name__ == "__main__":
 
-    b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
-    b2 = b1 * 1.1
+#     jax.config.update("")
 
-    m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
-    m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
-    true_x1 = jnp.linalg.solve(m1, b1)
-    true_x2 = jnp.linalg.solve(m2, b2)
+#     # example usage
+#     # -------------
+#     M1 = jnp.array([
+#         [4., 0., 1., 0., 0.],
+#         [0., 3., 2., 0., 0.],
+#         [0., 0., 5., 0., 1.],
+#         [0., 0., 0., 1., 0.],
+#         [0., 0., 0., 0., 2.],
+#     ])
+#     M2 = M1 * 0.9
 
-    LHS1 = jsparse.BCSR.fromdense(M1)
-    LHS2 = jsparse.BCSR.fromdense(M2)
-    csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
-    csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
+#     b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
+#     b2 = b1 * 1.1
 
-    assert all(csr_offsets1 == csr_offsets2)
-    assert all(csr_columns1 == csr_columns2)
+#     m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
+#     m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
+#     true_x1 = jnp.linalg.solve(m1, b1)
+#     true_x2 = jnp.linalg.solve(m2, b2)
 
-    batch_size = 2
-    offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
-    columns_batch = jnp.vstack([csr_columns1, csr_columns2])
-    csr_values = jnp.vstack([csr_values1, csr_values2])
-    device_id = 0; mtype_id = 1; mview_id = 1
-    b = jnp.vstack([b1, b2])
+#     LHS1 = jsparse.BCSR.fromdense(M1)
+#     LHS2 = jsparse.BCSR.fromdense(M2)
+#     csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
+#     csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
 
-    # instantiate solve
-    solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
+#     assert all(csr_offsets1 == csr_offsets2)
+#     assert all(csr_columns1 == csr_columns2)
 
-    # call it - dispatches single solve by default
-    test1, in1 = solver(b[0], csr_values[0])
+#     batch_size = 2
+#     offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
+#     columns_batch = jnp.vstack([csr_columns1, csr_columns2])
+#     csr_values = jnp.vstack([csr_values1, csr_values2])
+#     device_id = 0; mtype_id = 1; mview_id = 1
+#     b = jnp.vstack([b1, b2])
 
-    # call it in vmap/jit
-    test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+#     # instantiate solve
+#     solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
 
-    # unlimited composability in jit/vmap
-    b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
-    csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
-    test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+#     # call it - dispatches single solve by default
+#     test1, in1 = solver(b[0], csr_values[0])
 
-    # see difference between dense solves and cuDSS
-    pass
+#     # call it in vmap/jit
+#     test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+
+#     # unlimited composability in jit/vmap
+#     b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
+#     csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
+#     test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+
+#     M1 = jnp.array([
+#         [0., 0., 1., 0., 0.],
+#         [0., 0., 2., 0., 0.],
+#         [0., 0., 0., 0., 1.],
+#         [0., 0., 0., 1., 0.],
+#         [0., 0., 0., 0., 2.],
+#     ])
+#     M2 = M1 * 0.9
+
+#     b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
+#     b2 = b1 * 1.1
+
+#     m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
+#     m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
+#     true_x1 = jnp.linalg.solve(m1, b1)
+#     true_x2 = jnp.linalg.solve(m2, b2)
+
+#     LHS1 = jsparse.BCSR.fromdense(M1)
+#     LHS2 = jsparse.BCSR.fromdense(M2)
+#     csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
+#     csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
+
+#     assert all(csr_offsets1 == csr_offsets2)
+#     assert all(csr_columns1 == csr_columns2)
+
+#     batch_size = 2
+#     offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
+#     columns_batch = jnp.vstack([csr_columns1, csr_columns2])
+#     csr_values = jnp.vstack([csr_values1, csr_values2])
+#     device_id = 0; mtype_id = 1; mview_id = 1
+#     b = jnp.vstack([b1, b2])
+
+#     # instantiate solve
+#     solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
+
+#     # call it - dispatches single solve by default
+#     test1, in1 = solver(b[0], csr_values[0])
+
+#     # call it in vmap/jit
+#     test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
+
+#     # unlimited composability in jit/vmap
+#     b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
+#     csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
+#     test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
+
+#     # see difference between dense solves and cuDSS
+#     pass
 
 

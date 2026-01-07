@@ -109,8 +109,6 @@ struct CudssBatchState {
     cudssStatus_t status = CUDSS_STATUS_SUCCESS;
     int32_t* batched_offsets_ptr = nullptr; // the pseudo batch must form these manually in C++
     int32_t* batched_columns_ptr = nullptr; // the pseudo batch must form these manually in C++
-    typename get_native_data_type<T>::type* diag_temp = nullptr; // temporary storage for diagonal values
-    int32_t* perm_temp = nullptr; // temporary storage for permutation
     int64_t n;
     int64_t nnz;
     int64_t nrhs;
@@ -126,19 +124,23 @@ struct CudssBatchState {
     using native_dtype = typename get_native_data_type<T>::type;
 
     ~CudssBatchState() {
-        if (handle) {
-            // CuDSS destruction
-            cudssMatrixDestroy(A);
-            cudssMatrixDestroy(b);
-            cudssMatrixDestroy(x);
-            cudssDataDestroy(handle, data);
-            cudssConfigDestroy(config);
-            cudssDestroy(handle);
-        }
-        if (diag_temp) cudaFree(diag_temp);
-        if (perm_temp) cudaFree(perm_temp);
-        if (batched_offsets_ptr) cudaFree(batched_offsets_ptr);
-        if (batched_columns_ptr) cudaFree(batched_columns_ptr);
+        // TODO: Fix destructor - currently causes double free on CUDA 13 / cuDSS 0.7
+        // The issue is likely related to cudaMallocAsync/cudaFree mismatch or
+        // destruction order of cuDSS objects that reference batched_*_ptr memory.
+        // For now, we leak memory to avoid the crash.
+
+        // cudaDeviceSynchronize();
+        //
+        // if (handle) {
+        //     cudssMatrixDestroy(A);
+        //     cudssMatrixDestroy(b);
+        //     cudssMatrixDestroy(x);
+        //     cudssDataDestroy(handle, data);
+        //     cudssConfigDestroy(config);
+        //     cudssDestroy(handle);
+        // }
+        // if (batched_offsets_ptr) cudaFree(batched_offsets_ptr);
+        // if (batched_columns_ptr) cudaFree(batched_columns_ptr);
     }
 };
 
@@ -204,10 +206,8 @@ static ffi::ErrorOr<std::unique_ptr<CudssBatchState<T>>> CudssInstantiate(
     // CUDA setup can happen here before any cudaMallocs
     cudaSetDevice(device_id);
 
-    // Allocate temporary storage for diagonal and permutation
-    size_t total_size = batch_size_64 * state->n;
-    cudaMalloc(&state->diag_temp, total_size * sizeof(typename get_native_data_type<T>::type));
-    cudaMalloc(&state->perm_temp, total_size * sizeof(int32_t));
+    // Note: diag_temp and perm_temp are not used - output goes directly to FFI buffers
+    // The allocations were removed as they caused double-free due to state->n being uninitialized here
 
     return ffi::ErrorOr<std::unique_ptr<CudssBatchState<T>>>(std::move(state));
     // return state; // simply return the created CudssBatchState
@@ -406,6 +406,10 @@ static ffi::Error CudssExecute(
                     batch_size_64 * state->n * sizeof(typename get_native_data_type<T>::type), &state->sizeWritten);
     cudssDataGet(state->handle, state->data, CUDSS_DATA_PERM_REORDER_ROW, perm_buf->typed_data(),
                     batch_size_64 * state->n * sizeof(int32_t), &state->sizeWritten);
+
+    // Synchronize to ensure all async operations complete before returning control to JAX
+    // This prevents race conditions where JAX may free buffers before cuDSS finishes writing
+    cudaStreamSynchronize(stream);
 
     return ffi::Error::Success();
 }

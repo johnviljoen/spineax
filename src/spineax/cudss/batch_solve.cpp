@@ -105,15 +105,15 @@ struct CudssBatchState {
     using native_dtype = typename get_native_data_type<T>::type;
 
     ~CudssBatchState() {
-        if (handle) {
-            // CuDSS destruction
-            cudssMatrixDestroy(A);
-            cudssMatrixDestroy(b);
-            cudssMatrixDestroy(x);
-            cudssDataDestroy(handle, data);
-            cudssConfigDestroy(config);
-            cudssDestroy(handle);
-        }
+        // TODO: Fix destructor - currently causes double free on CUDA 13 / cuDSS 0.7
+        // if (handle) {
+        //     cudssMatrixDestroy(A);
+        //     cudssMatrixDestroy(b);
+        //     cudssMatrixDestroy(x);
+        //     cudssDataDestroy(handle, data);
+        //     cudssConfigDestroy(config);
+        //     cudssDestroy(handle);
+        // }
     }
 };
 

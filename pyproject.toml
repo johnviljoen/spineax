@@ -2,8 +2,8 @@
 requires = [
     "scikit-build-core >= 0.5", 
     "nanobind", 
-    "jax[cuda12]", 
-    "nvidia-cudss-cu12",
+    "jax[cuda13]==0.8.0", 
+    "nvidia-cudss-cu13",
     "ninja"
 ]
 build-backend = "scikit_build_core.build"
@@ -16,10 +16,12 @@ authors = [
     {name = "John Viljoen"}
 ]
 dependencies = [
-    "jax[cuda12]", # gives us XLA, CUDART, nvcc...
-    "nvidia-cudss-cu12", # cudss is in pip!!! how helpful
+    "jax[cuda13]==0.8.0", # gives us XLA, CUDART, nvcc...
+    "nvidia-cudss-cu13", # cudss is in pip!!! how helpful
     "ninja", # for hot re-building on editable install
-    "jaxtyping"
+    "jaxtyping",
+    "nanobind",
+    "equinox"
 ]
 
 [tool.scikit-build]
