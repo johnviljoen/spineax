@@ -4,7 +4,6 @@ requires = [
     "nanobind", 
     "jax[cuda12]", 
     "nvidia-cudss-cu12",
-    "ninja"
 ]
 build-backend = "scikit_build_core.build"
 

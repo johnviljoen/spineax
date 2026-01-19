@@ -5,7 +5,7 @@ project(${SKBUILD_PROJECT_NAME} LANGUAGES CXX)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 
 # 1. Find the Python interpreter from your active environment.
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 message(STATUS "Using Python interpreter: ${Python_EXECUTABLE}")
 
 # 2. Get the path to the CUDA libraries from the Python environment.
