@@ -192,13 +192,12 @@ def general_batch_solve_impl(
         name,
         (
             jax.ShapeDtypeStruct(b_values.shape, b_values.dtype),   # x
-            jax.ShapeDtypeStruct((b_values.size,), b_values.dtype),   # diag
-            jax.ShapeDtypeStruct((b_values.size,), jnp.int32),        # perm_reorder_row
+            jax.ShapeDtypeStruct((batch_size, 2), jnp.int32),       # inertia
         ),
         has_side_effect=True
     )
 
-    x, diag, perm = call(
+    x, inertia = call(
         b_values, 
         csr_values, 
         csr_offsets,
@@ -209,9 +208,6 @@ def general_batch_solve_impl(
         mview_id = mview_id,
     )
 
-    # Compute inertia instead of returning diag and perm
-    matrix_dim = b_values.shape[1]  # Assuming b_values shape is (batch_size, n)
-    inertia = compute_inertia_from_diag_perm(diag, perm, batch_size, matrix_dim)
     return [x, inertia]
 
 
@@ -526,7 +522,7 @@ def solve_single_c64_vmap(vector_arg_values, batch_axes, **kwargs):
 def solve_single_c128_vmap(vector_arg_values, batch_axes, **kwargs):
     return general_solve_vmap(vector_arg_values, batch_axes, **kwargs)
 
-vmap_using_pseudo_batch = True
+vmap_using_pseudo_batch = False
 
 def general_solve_vmap(
     vector_arg_values: tuple[Array, Array],     # [b_values, csr_values]
@@ -578,7 +574,7 @@ def general_solve_vmap(
             solver = solve_batch_c128_p
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
-        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
+        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0, 0)
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is True:
         if csr_values.dtype == jnp.float32:
             solver = solve_pbatch_f32_p
@@ -591,7 +587,7 @@ def general_solve_vmap(
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
-        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
+        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0, 0)
     
     else:
         raise NotImplementedError("This path should not be possible")
@@ -707,3 +703,4 @@ class CuDSSSolver(eqx.Module):
             mtype_id=self.mtype_id,
             mview_id=self.mview_id
         )   
+        1

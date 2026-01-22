@@ -20,7 +20,7 @@ namespace nb = nanobind;
     do { \
         status = call; \
         if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("Example FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            printf("FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
             return ffi::Error::Success(); \
         } \
     } while(0);
@@ -263,7 +263,6 @@ static ffi::Error CudssExecute(
         state->call_count++;
     }
     else {
-        printf("not first execute call\n");
         // stream can change between calls!!!
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 

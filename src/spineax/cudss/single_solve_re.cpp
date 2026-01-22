@@ -20,7 +20,7 @@ namespace nb = nanobind;
     do { \
         status = call; \
         if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("Example FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            printf("FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
             return ffi::Error::Success(); \
         } \
     } while(0);
@@ -39,7 +39,7 @@ namespace nb = nanobind;
     do { \
         status = call; \
         if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("Example FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            printf("FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
             return ffi::Error::Success(); \
         } else { \
             int info_temp; \
