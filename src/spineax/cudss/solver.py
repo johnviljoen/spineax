@@ -533,6 +533,9 @@ def general_solve_vmap(
     b_values, csr_values, csr_offsets, csr_columns = vector_arg_values
     a_b, a_val, a_off, a_col = batch_axes
 
+    # Debug output
+    jax.debug.print("vmap batch_axes: a_b={}, a_val={}, a_off={}, a_col={}", a_b, a_val, a_off, a_col)
+
     # Handle spurious batch axes on sparsity patterns.
     # This happens when the solve is inside a jax.lax.switch that gets vmapped -
     # JAX broadcasts all branch inputs to have batch dimensions, even constants.
@@ -559,9 +562,40 @@ def general_solve_vmap(
         return solve(*vector_arg_values, **kwargs), (None, None)
 
     # if only one of the sets of values are batched
-    elif a_val or a_b is None:
-        raise NotImplementedError("Both csr_values and b_values must be batched")
-    
+    elif (a_val is None) != (a_b is None):
+        if a_b is not None and a_val is None:
+            # Only b is batched - broadcast csr_values to match batch dimension
+            csr_values_batched = jnp.broadcast_to(csr_values[None, :], (b_values.shape[0],) + csr_values.shape)
+            vector_arg_values = (b_values, csr_values_batched, csr_offsets, csr_columns)
+
+            if vmap_using_pseudo_batch:
+                if csr_values.dtype == jnp.float32:
+                    solver = solve_pbatch_f32_p
+                elif csr_values.dtype == jnp.float64:
+                    solver = solve_pbatch_f64_p
+                elif csr_values.dtype == jnp.complex64:
+                    solver = solve_pbatch_c64_p
+                elif csr_values.dtype == jnp.complex128:
+                    solver = solve_pbatch_c128_p
+                else:
+                    raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
+            else:
+                if csr_values.dtype == jnp.float32:
+                    solver = solve_batch_f32_p
+                elif csr_values.dtype == jnp.float64:
+                    solver = solve_batch_f64_p
+                elif csr_values.dtype == jnp.complex64:
+                    solver = solve_batch_c64_p
+                elif csr_values.dtype == jnp.complex128:
+                    solver = solve_batch_c128_p
+                else:
+                    raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
+
+            return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0, 0)
+        else:
+            # Only csr_values is batched (not b) - not supported
+            raise NotImplementedError("Only csr_values batched (not b_values) is not supported")
+
     # the batched path binding
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is False:
         if csr_values.dtype == jnp.float32:
@@ -632,8 +666,54 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
         return solve(*vector_arg_values, **kwargs), (None, None)
 
     # if only one of the sets of values are batched
-    elif a_val or a_b is None:
-        raise NotImplementedError("Both csr_values and b_values must be batched")
+    elif (a_val is None) != (a_b is None):
+        if a_b is not None and a_val is None:
+            # Only b is batched in nested vmap - broadcast csr_values
+            csr_values_batched = jnp.broadcast_to(csr_values[None, :, :], (b_values.shape[0],) + csr_values.shape)
+            b_flat = b_values.reshape(-1, b_values.shape[-1])
+            csr_flat = csr_values_batched.reshape(-1, csr_values.shape[-1])
+
+            if vmap_using_pseudo_batch:
+                if csr_values.dtype == jnp.float32:
+                    solver = solve_pbatch_f32_p
+                elif csr_values.dtype == jnp.float64:
+                    solver = solve_pbatch_f64_p
+                elif csr_values.dtype == jnp.complex64:
+                    solver = solve_pbatch_c64_p
+                elif csr_values.dtype == jnp.complex128:
+                    solver = solve_pbatch_c128_p
+                else:
+                    raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
+            else:
+                if csr_values.dtype == jnp.float32:
+                    solver = solve_batch_f32_p
+                elif csr_values.dtype == jnp.float64:
+                    solver = solve_batch_f64_p
+                elif csr_values.dtype == jnp.complex64:
+                    solver = solve_batch_c64_p
+                elif csr_values.dtype == jnp.complex128:
+                    solver = solve_batch_c128_p
+                else:
+                    raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
+
+            total_batch = b_flat.shape[0]
+            # Remove old batch_size from kwargs
+            kwargs_copy = dict(kwargs)
+            kwargs_copy.pop("batch_size", None)
+            x_flat, inertia_flat = solver.bind(
+                b_flat, csr_flat, csr_offsets, csr_columns,
+                batch_size=total_batch,
+                **kwargs_copy
+            )
+
+            # Reshape back
+            x = x_flat.reshape(b_values.shape[0], b_values.shape[1], -1)
+            inertia = inertia_flat.reshape(b_values.shape[0], b_values.shape[1], 2)
+
+            return (x, inertia), (0, 0)
+        else:
+            # Only csr_values is batched (not b) - not supported
+            raise NotImplementedError("Only csr_values batched (not b_values) is not supported")
 
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is False:
         if csr_values.dtype == jnp.float32:
@@ -646,7 +726,10 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
             solver = solve_batch_c128_p
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
-        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
+        # Remove old batch_size from kwargs if it exists
+        kwargs_copy = dict(kwargs)
+        kwargs_copy.pop("batch_size", None)
+        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs_copy), (0,0)
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is True:
         if csr_values.dtype == jnp.float32:
             solver = solve_pbatch_f32_p
@@ -659,14 +742,15 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
-    # we are replacing this
-    kwargs.__delitem__("batch_size")
+        # Remove old batch_size from kwargs
+        kwargs_copy = dict(kwargs)
+        kwargs_copy.pop("batch_size", None)
 
-    x_flat, inertia_flat = solver.bind(
-        b_flat, csr_flat, csr_offsets, csr_columns,
-        batch_size=total_batch, 
-        **kwargs
-    )
+        x_flat, inertia_flat = solver.bind(
+            b_flat, csr_flat, csr_offsets, csr_columns,
+            batch_size=total_batch,
+            **kwargs_copy
+        )
     
     # Reshape back
     x = x_flat.reshape(batch_size1, batch_size2, -1)
