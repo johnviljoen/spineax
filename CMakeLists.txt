@@ -15,14 +15,15 @@ message(STATUS "Using Python interpreter: ${Python_EXECUTABLE}")
 set(_site_prefix "")
 foreach(_p IN LISTS CMAKE_PREFIX_PATH)
   message(STATUS "CMAKE_PREFIX_PATH entry: ${_p}")
-  if(_p MATCHES "site-packages")
+  # Support both site-packages (pip/venv) and dist-packages (Debian/Ubuntu system Python)
+  if(_p MATCHES "site-packages" OR _p MATCHES "dist-packages")
     set(_site_prefix "${_p}")
   endif()
 endforeach()
 
 if(NOT _site_prefix)
   message(FATAL_ERROR
-    "Could not find a 'site-packages' entry in CMAKE_PREFIX_PATH.\n"
+    "Could not find a 'site-packages' or 'dist-packages' entry in CMAKE_PREFIX_PATH.\n"
     "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}\n")
 endif()
 
