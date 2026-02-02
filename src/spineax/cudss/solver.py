@@ -192,13 +192,12 @@ def general_batch_solve_impl(
         name,
         (
             jax.ShapeDtypeStruct(b_values.shape, b_values.dtype),   # x
-            jax.ShapeDtypeStruct((b_values.size,), b_values.dtype),   # diag
-            jax.ShapeDtypeStruct((b_values.size,), jnp.int32),        # perm_reorder_row
+            jax.ShapeDtypeStruct((batch_size, 2), jnp.int32),       # inertia
         ),
         has_side_effect=True
     )
 
-    x, diag, perm = call(
+    x, inertia = call(
         b_values, 
         csr_values, 
         csr_offsets,
@@ -209,9 +208,6 @@ def general_batch_solve_impl(
         mview_id = mview_id,
     )
 
-    # Compute inertia instead of returning diag and perm
-    matrix_dim = b_values.shape[1]  # Assuming b_values shape is (batch_size, n)
-    inertia = compute_inertia_from_diag_perm(diag, perm, batch_size, matrix_dim)
     return [x, inertia]
 
 
@@ -268,16 +264,29 @@ def general_pbatch_solve_impl(
     return [x, inertia]
 
 # registrations and lowerings ==================================================
+try:
+    from jax._src.lib import jaxlib_extension_version
+    _NEW_FFI_API = jaxlib_extension_version >= 381
+except ImportError:
+    _NEW_FFI_API = False
+
+
+def register_ffi(name: str, func, *, type: str, platform: str = "CUDA"):
+    handler = getattr(func, f"handler_{type}")()
+    state_dict = getattr(func, f"state_dict_{type}")()
+    type_id = getattr(func, f"type_id_{type}")()
+    if _NEW_FFI_API:
+        jax.ffi.register_ffi_type(name, state_dict, platform=platform)
+    else:
+        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    # order matters, ffi_target needs to be registered after type
+    jax.ffi.register_ffi_target(name, handler, platform=platform)
 
 # single
-jax.ffi.register_ffi_target("solve_single_f32", single_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f32", single_solve.type_id_f32(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_f64", single_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f64", single_solve.type_id_f64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c64", single_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c64", single_solve.type_id_c64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c128", single_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c128", single_solve.type_id_c128(), platform="CUDA")
+register_ffi("solve_single_f32", single_solve, type="f32")
+register_ffi("solve_single_f64", single_solve, type="f64")
+register_ffi("solve_single_c64", single_solve, type="c64")
+register_ffi("solve_single_c128", single_solve, type="c128")
 
 solve_single_f32_low = mlir.lower_fun(solve_single_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_p, solve_single_f32_low)
@@ -289,14 +298,10 @@ solve_single_c128_low = mlir.lower_fun(solve_single_c128_impl, multiple_results=
 mlir.register_lowering(solve_single_c128_p, solve_single_c128_low)
 
 # batch
-jax.ffi.register_ffi_target("solve_batch_f32", batch_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_f32", batch_solve.type_id_f32(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_batch_f64", batch_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_f64", batch_solve.type_id_f64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_batch_c64", batch_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_c64", batch_solve.type_id_c64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_batch_c128", batch_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_batch_c128", batch_solve.type_id_c128(), platform="CUDA")
+register_ffi("solve_batch_f32", batch_solve, type="f32")
+register_ffi("solve_batch_f64", batch_solve, type="f64")
+register_ffi("solve_batch_c64", batch_solve, type="c64")
+register_ffi("solve_batch_c128", batch_solve, type="c128")
 
 solve_batch_f32_low = mlir.lower_fun(solve_batch_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_batch_f32_p, solve_batch_f32_low)
@@ -308,14 +313,10 @@ solve_batch_c128_low = mlir.lower_fun(solve_batch_c128_impl, multiple_results=Tr
 mlir.register_lowering(solve_batch_c128_p, solve_batch_c128_low)
 
 # psuedo batch
-jax.ffi.register_ffi_target("solve_pbatch_f32", pbatch_solve.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_f32", pbatch_solve.type_id_f32(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_f64", pbatch_solve.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_f64", pbatch_solve.type_id_f64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_c64", pbatch_solve.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_c64", pbatch_solve.type_id_c64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_pbatch_c128", pbatch_solve.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_pbatch_c128", pbatch_solve.type_id_c128(), platform="CUDA")
+register_ffi("solve_pbatch_f32", pbatch_solve, type="f32")
+register_ffi("solve_pbatch_f64", pbatch_solve, type="f64")
+register_ffi("solve_pbatch_c64", pbatch_solve, type="c64")
+register_ffi("solve_pbatch_c128", pbatch_solve, type="c128")
 
 solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
@@ -521,7 +522,7 @@ def solve_single_c64_vmap(vector_arg_values, batch_axes, **kwargs):
 def solve_single_c128_vmap(vector_arg_values, batch_axes, **kwargs):
     return general_solve_vmap(vector_arg_values, batch_axes, **kwargs)
 
-vmap_using_pseudo_batch = True
+vmap_using_pseudo_batch = False
 
 def general_solve_vmap(
     vector_arg_values: tuple[Array, Array],     # [b_values, csr_values]
@@ -573,7 +574,7 @@ def general_solve_vmap(
             solver = solve_batch_c128_p
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
-        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
+        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0, 0)
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is True:
         if csr_values.dtype == jnp.float32:
             solver = solve_pbatch_f32_p
@@ -586,7 +587,7 @@ def general_solve_vmap(
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
-        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
+        return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0, 0)
     
     else:
         raise NotImplementedError("This path should not be possible")
@@ -702,60 +703,4 @@ class CuDSSSolver(eqx.Module):
             mtype_id=self.mtype_id,
             mview_id=self.mview_id
         )   
-
-if __name__ == "__main__":
-
-    import jax.experimental.sparse as jsparse
-
-    # example usage
-    # -------------
-    M1 = jnp.array([
-        [4., 0., 1., 0., 0.],
-        [0., 3., 2., 0., 0.],
-        [0., 0., 5., 0., 1.],
-        [0., 0., 0., 1., 0.],
-        [0., 0., 0., 0., 2.],
-    ])
-    M2 = M1 * 0.9
-
-    b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
-    b2 = b1 * 1.1
-
-    m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
-    m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
-    true_x1 = jnp.linalg.solve(m1, b1)
-    true_x2 = jnp.linalg.solve(m2, b2)
-
-    LHS1 = jsparse.BCSR.fromdense(M1)
-    LHS2 = jsparse.BCSR.fromdense(M2)
-    csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
-    csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
-
-    assert all(csr_offsets1 == csr_offsets2)
-    assert all(csr_columns1 == csr_columns2)
-
-    batch_size = 2
-    offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
-    columns_batch = jnp.vstack([csr_columns1, csr_columns2])
-    csr_values = jnp.vstack([csr_values1, csr_values2])
-    device_id = 0; mtype_id = 1; mview_id = 1
-    b = jnp.vstack([b1, b2])
-
-    # instantiate solve
-    solver = CuDSSSolver(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
-
-    # call it - dispatches single solve by default
-    test1, in1 = solver(b[0], csr_values[0])
-
-    # call it in vmap/jit
-    test2, in2 = jax.jit(jax.vmap(solver))(b, csr_values)
-
-    # unlimited composability in jit/vmap
-    b_ = jnp.stack([jnp.stack([b,b]), jnp.stack([b,b])])
-    csr_values_ = jnp.stack([jnp.stack([csr_values, csr_values]), jnp.stack([csr_values, csr_values])])
-    test3, in3 = jax.jit(jax.vmap(jax.vmap(jax.vmap(solver))))(b_, csr_values_)
-
-    # see difference between dense solves and cuDSS
-    pass
-
-
+        1

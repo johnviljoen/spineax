@@ -5,103 +5,129 @@ project(${SKBUILD_PROJECT_NAME} LANGUAGES CXX)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 
 # 1. Find the Python interpreter from your active environment.
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 message(STATUS "Using Python interpreter: ${Python_EXECUTABLE}")
 
-# 2. Get the path to the CUDA libraries from the Python environment.
-execute_process(
-    COMMAND ${Python_EXECUTABLE} -c "
-import sys
-import os
-from importlib.util import find_spec
-from pathlib import Path
+# 2. Use NVIDIA libs from Python site-packages/nvidia/*/ (directories there contain include/ and lib/).
+# --- Derive NVIDIA prefix from CMAKE_PREFIX_PATH ---
+# We look for a prefix containing "site-packages", then scan nvidia/* for include/lib.
 
-def get_base_path(spec):
-    if spec.submodule_search_locations: return Path(spec.submodule_search_locations[0])
-    return None
+set(_site_prefix "")
+foreach(_p IN LISTS CMAKE_PREFIX_PATH)
+  message(STATUS "CMAKE_PREFIX_PATH entry: ${_p}")
+  if(_p MATCHES "site-packages")
+    set(_site_prefix "${_p}")
+  endif()
+endforeach()
 
-try:
-    # Find the base path for nvidia packages
-    cudnn_spec = find_spec('nvidia.cudnn')
-    if cudnn_spec is None: raise ImportError('A nvidia-* pip package must be installed.')
-    base_path = get_base_path(cudnn_spec)
-    if base_path is None: raise ImportError('Could not determine path for nvidia packages.')
-    site_packages = base_path.parent.parent
-    print(f'NVIDIA_PATH={site_packages}')
-
-    # Find CUDA Runtime
-    cudart_spec = find_spec('nvidia.cuda_runtime')
-    if cudart_spec is None: raise ImportError('nvidia.cuda_runtime not found.')
-    cudart_path = get_base_path(cudart_spec)
-    cudart_libs = list((cudart_path / 'lib').glob('libcudart.so*'))
-    if not cudart_libs: raise ImportError(f'libcudart.so not found in {cudart_path}')
-    cudart_lib_file = sorted(cudart_libs, key=lambda p: len(str(p)))[-1]
-    print(f'CUDART_LIBRARY_PATH={cudart_lib_file.resolve()}')
-
-    # Find cuDSS
-    cudss_spec = find_spec('nvidia.cu12')
-    if cudss_spec is None: raise ImportError('nvidia.cudss not found.')
-    cudss_path = get_base_path(cudss_spec)
-    cudss_libs = list((cudss_path / 'lib').glob('libcudss.so*'))
-    if not cudss_libs: raise ImportError(f'libcudss.so not found in {cudss_path}')
-    cudss_lib_file = sorted(cudss_libs, key=lambda p: len(str(p)))[-1]
-    print(f'CUDSS_LIBRARY_PATH={cudss_lib_file.resolve()}')
-
-    # Find cuBLAS
-    cublas_spec = find_spec('nvidia.cublas')
-    if cublas_spec is None: raise ImportError('nvidia.cublas not found. Did you pip install nvidia-cublas-cu12?')
-    cublas_path = get_base_path(cublas_spec)
-    cublas_libs = list((cublas_path / 'lib').glob('libcublas.so*'))
-    if not cublas_libs: raise ImportError(f'libcublas.so not found in {cublas_path}')
-    cublas_lib_file = sorted(cublas_libs, key=lambda p: len(str(p)))[-1]
-    print(f'CUBLAS_LIBRARY_PATH={cublas_lib_file.resolve()}')
-
-except ImportError as e:
-    sys.exit(f'Could not find required packages: {e}')
-"
-    OUTPUT_VARIABLE PYTHON_OUTPUTS
-    RESULT_VARIABLE PYTHON_RESULT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-if(PYTHON_RESULT)
-    message(FATAL_ERROR "Failed to find NVIDIA packages: ${PYTHON_RESULT}")
+if(NOT _site_prefix)
+  message(FATAL_ERROR
+    "Could not find a 'site-packages' entry in CMAKE_PREFIX_PATH.\n"
+    "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}\n")
 endif()
 
-# Parse outputs
-string(REGEX MATCH "NVIDIA_PATH=([^\n]*)" _ ${PYTHON_OUTPUTS})
-set(ENV_NVIDIA_PATH ${CMAKE_MATCH_1})
-string(REGEX MATCH "CUDART_LIBRARY_PATH=([^\n]*)" _ ${PYTHON_OUTPUTS})
-set(ENV_CUDART_PATH ${CMAKE_MATCH_1})
-string(REGEX MATCH "CUDSS_LIBRARY_PATH=([^\n]*)" _ ${PYTHON_OUTPUTS})
-set(ENV_CUDSS_PATH ${CMAKE_MATCH_1})
-string(REGEX MATCH "CUBLAS_LIBRARY_PATH=([^\n]*)" _ ${PYTHON_OUTPUTS})
-set(ENV_CUBLAS_PATH ${CMAKE_MATCH_1})
+set(_nvidia_root "${_site_prefix}/nvidia")
 
-message(STATUS "Found Python CUDA libs at: ${ENV_NVIDIA_PATH}")
-message(STATUS "Found libcudart.so at: ${ENV_CUDART_PATH}")
-message(STATUS "Found libcudss.so at: ${ENV_CUDSS_PATH}")
-message(STATUS "Found libcublas.so at: ${ENV_CUBLAS_PATH}")
+set(ENV_NVIDIA_LIB_DIRS "")
+set(ENV_NVIDIA_INCLUDE_DIRS "")
+set(ENV_NVIDIA_LEAFS "")
 
-# CUDART
-add_library(cudart_from_python SHARED IMPORTED)
-set_target_properties(cudart_from_python PROPERTIES
-    IMPORTED_LOCATION "${ENV_CUDART_PATH}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_PATH}/nvidia/cuda_runtime/include"
+if(EXISTS "${_nvidia_root}")
+  file(GLOB _nvidia_candidates LIST_DIRECTORIES true "${_nvidia_root}/*")
+  foreach(_cand IN LISTS _nvidia_candidates)
+    if(IS_DIRECTORY "${_cand}")
+      if(EXISTS "${_cand}/lib")
+        list(APPEND ENV_NVIDIA_LIB_DIRS "${_cand}/lib")
+        get_filename_component(_leaf "${_cand}" NAME)
+        list(APPEND ENV_NVIDIA_LEAFS "${_leaf}")
+      endif()
+      if(EXISTS "${_cand}/include")
+        list(APPEND ENV_NVIDIA_INCLUDE_DIRS "${_cand}/include")
+      endif()
+    endif()
+  endforeach()
+endif()
+
+list(REMOVE_DUPLICATES ENV_NVIDIA_LIB_DIRS)
+list(REMOVE_DUPLICATES ENV_NVIDIA_INCLUDE_DIRS)
+list(REMOVE_DUPLICATES ENV_NVIDIA_LEAFS)
+
+if(NOT ENV_NVIDIA_LIB_DIRS)
+  message(FATAL_ERROR
+    "Found site-packages prefix: ${_site_prefix}\n"
+    "But could not find any nvidia/* with lib/ and include/ under:\n"
+    "  ${_nvidia_root}")
+endif()
+
+set(ENV_NVIDIA_BUILD_RPATH "")
+foreach(_libdir IN LISTS ENV_NVIDIA_LIB_DIRS)
+  if(ENV_NVIDIA_BUILD_RPATH)
+    set(ENV_NVIDIA_BUILD_RPATH "${ENV_NVIDIA_BUILD_RPATH}:${_libdir}")
+  else()
+    set(ENV_NVIDIA_BUILD_RPATH "${_libdir}")
+  endif()
+endforeach()
+
+set(ENV_NVIDIA_INSTALL_RPATH "")
+foreach(_leaf IN LISTS ENV_NVIDIA_LEAFS)
+  if(ENV_NVIDIA_INSTALL_RPATH)
+    set(ENV_NVIDIA_INSTALL_RPATH "${ENV_NVIDIA_INSTALL_RPATH}:$ORIGIN/../nvidia/${_leaf}/lib")
+  else()
+    set(ENV_NVIDIA_INSTALL_RPATH "$ORIGIN/../nvidia/${_leaf}/lib")
+  endif()
+endforeach()
+
+message(STATUS "Using NVIDIA lib dirs: ${ENV_NVIDIA_LIB_DIRS}")
+foreach(_libdir IN LISTS ENV_NVIDIA_LIB_DIRS)
+  message(STATUS "  ${_libdir}")
+endforeach()
+message(STATUS "Using NVIDIA include dirs:")
+foreach(_incdir IN LISTS ENV_NVIDIA_INCLUDE_DIRS)
+  message(STATUS "  ${_incdir}")
+endforeach()
+
+find_library(ENV_CUDART_PATH
+  NAMES cudart libcudart libcudart.so libcudart.so.13 libcudart.so.12
+  HINTS ${ENV_NVIDIA_LIB_DIRS}
+  NO_DEFAULT_PATH
+  REQUIRED
 )
 
-# CUDSS
-add_library(cudss_from_python SHARED IMPORTED)
-set_target_properties(cudss_from_python PROPERTIES
-    IMPORTED_LOCATION "${ENV_CUDSS_PATH}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_PATH}/nvidia/cu12/include"
+find_library(ENV_CUBLAS_PATH
+  NAMES cublas libcublas libcublas.so libcublas.so.13 libcublas.so.12
+  HINTS ${ENV_NVIDIA_LIB_DIRS}
+  NO_DEFAULT_PATH
+  REQUIRED
 )
 
-# cuBLAS
-add_library(cublas_from_python SHARED IMPORTED)
-set_target_properties(cublas_from_python PROPERTIES
-    IMPORTED_LOCATION "${ENV_CUBLAS_PATH}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_PATH}/nvidia/cublas/include"
+find_library(ENV_CUDSS_PATH
+  NAMES cudss libcudss libcudss.so libcudss.so.0 libcudss.so.13 libcudss.so.12
+  HINTS ${ENV_NVIDIA_LIB_DIRS}
+  NO_DEFAULT_PATH
+  REQUIRED
+)
+
+message(STATUS "Found libcudart at: ${ENV_CUDART_PATH}")
+message(STATUS "Found libcudss  at: ${ENV_CUDSS_PATH}")
+message(STATUS "Found libcublas at: ${ENV_CUBLAS_PATH}")
+
+# --- Imported targets (clean linking) ---
+add_library(nvidia::cudart SHARED IMPORTED GLOBAL)
+set_target_properties(nvidia::cudart PROPERTIES
+  IMPORTED_LOCATION "${ENV_CUDART_PATH}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_INCLUDE_DIRS}"
+)
+
+add_library(nvidia::cudss SHARED IMPORTED GLOBAL)
+set_target_properties(nvidia::cudss PROPERTIES
+  IMPORTED_LOCATION "${ENV_CUDSS_PATH}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_INCLUDE_DIRS}"
+)
+
+add_library(nvidia::cublas SHARED IMPORTED GLOBAL)
+set_target_properties(nvidia::cublas PROPERTIES
+  IMPORTED_LOCATION "${ENV_CUBLAS_PATH}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ENV_NVIDIA_INCLUDE_DIRS}"
 )
 
 find_package(nanobind CONFIG REQUIRED)
@@ -109,12 +135,12 @@ find_package(nanobind CONFIG REQUIRED)
 # XLA
 execute_process(
   COMMAND "${Python_EXECUTABLE}"
-          "-c" "from jax import ffi; print(ffi.include_dir())"
+  "-c" "from jax import ffi; print(ffi.include_dir())"
   OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE XLA_DIR)
 message(STATUS "XLA include directory: ${XLA_DIR}")
 
-# O3 optimization build
-if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+# 3 optimization build
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
@@ -124,17 +150,17 @@ enable_language(CUDA)
 # cuDSS FFI files
 
 # traditional batch
-nanobind_add_module(batch_solve NOMINSIZE 
+nanobind_add_module(batch_solve NOMINSIZE
   src/spineax/cudss/batch_solve.cpp
 )
 
 # pseudo batch (enable features lacking in normal batch whilst also solving a batch)
-nanobind_add_module(pbatch_solve NOMINSIZE 
+nanobind_add_module(pbatch_solve NOMINSIZE
   src/spineax/cudss/pseudo_batch_solve.cu
 )
 
 # single solve and Return Everything (return all data that cuDSS has)
-nanobind_add_module(single_solve_re NOMINSIZE 
+nanobind_add_module(single_solve_re NOMINSIZE
   src/spineax/cudss/single_solve_re.cpp
 )
 
@@ -143,42 +169,48 @@ nanobind_add_module(single_solve NOMINSIZE
   src/spineax/cudss/single_solve.cpp
 )
 
-foreach(TARGET 
+foreach(TARGET
   batch_solve
   pbatch_solve
-  single_solve 
+  single_solve
   single_solve_re
 )
-    target_include_directories(${TARGET} PRIVATE
-        ${XLA_DIR}
-        cudss_from_python
-        cudart_from_python
-        cublas_from_python
-        "${ENV_NVIDIA_PATH}/nvidia/cuda_nvcc/include"
-    )
+  target_include_directories(${TARGET} PRIVATE
+    ${XLA_DIR}
+    nvidia::cudss
+    nvidia::cudart
+    nvidia::cublas
+    ${ENV_NVIDIA_INCLUDE_DIRS}
+  )
 
-    target_link_libraries(${TARGET} PRIVATE
-        cudss_from_python
-        cudart_from_python
-        cublas_from_python
-    )
-    
-    # Add RPATH so the .so can find its dependencies
-    # Use $ORIGIN to make paths relative to the installed module location
-    # Modules install to site-packages/spineax/, CUDA libs are in site-packages/nvidia/*/lib/
-    set_target_properties(${TARGET} PROPERTIES
-        BUILD_RPATH "${ENV_NVIDIA_PATH}/nvidia/cu12/lib:${ENV_NVIDIA_PATH}/nvidia/cublas/lib:${ENV_NVIDIA_PATH}/nvidia/cuda_runtime/lib"
-        INSTALL_RPATH "$ORIGIN/../nvidia/cu12/lib:$ORIGIN/../nvidia/cublas/lib:$ORIGIN/../nvidia/cuda_runtime/lib"
-        INSTALL_RPATH_USE_LINK_PATH FALSE
-    )
+  target_link_libraries(${TARGET} PRIVATE
+    nvidia::cudss
+    nvidia::cudart
+    nvidia::cublas
+  )
+
+  # Suppress warnings from XLA FFI headers that have control flow issues
+  # These are in jaxlib's XLA headers, not in spineax code
+  target_compile_options(${TARGET} PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-return-type -Wno-attributes>
+  )
+
+  # Add RPATH so the .so can find its dependencies
+  # Use $ORIGIN to make paths relative to the installed module location
+  # Modules install to site-packages/spineax/, CUDA libs are in site-packages/nvidia/*/lib/
+  set_target_properties(${TARGET} PROPERTIES
+    BUILD_RPATH "${ENV_NVIDIA_BUILD_RPATH}"
+    INSTALL_RPATH "${ENV_NVIDIA_INSTALL_RPATH}"
+    INSTALL_RPATH_USE_LINK_PATH FALSE
+  )
 endforeach()
 
 install(
-  TARGETS 
+  TARGETS
     batch_solve
     pbatch_solve
-    single_solve 
+    single_solve
     single_solve_re
-  LIBRARY 
+  LIBRARY
   DESTINATION spineax
 )

@@ -96,15 +96,29 @@ def general_single_solve_impl(
 
 # registrations and lowerings ==================================================
 
+try:
+    from jax._src.lib import jaxlib_extension_version
+    _NEW_FFI_API = jaxlib_extension_version >= 381
+except ImportError:
+    _NEW_FFI_API = False
+
+
+def register_ffi(name: str, func, *, type: str, platform: str = "CUDA"):
+    handler = getattr(func, f"handler_{type}")()
+    state_dict = getattr(func, f"state_dict_{type}")()
+    type_id = getattr(func, f"type_id_{type}")()
+    if _NEW_FFI_API:
+        jax.ffi.register_ffi_type(name, state_dict, platform=platform)
+    else:
+        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    # order matters, ffi_target needs to be registered after type
+    jax.ffi.register_ffi_target(name, handler, platform=platform)
+
 # single
-jax.ffi.register_ffi_target("solve_single_f32_re", single_solve_re.handler_f32(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f32_re", single_solve_re.type_id_f32(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_f64_re", single_solve_re.handler_f64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_f64_re", single_solve_re.type_id_f64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c64_re", single_solve_re.handler_c64(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c64_re", single_solve_re.type_id_c64(), platform="CUDA")
-jax.ffi.register_ffi_target("solve_single_c128_re", single_solve_re.handler_c128(), platform="CUDA")
-jax.ffi.register_ffi_type_id("solve_single_c128_re", single_solve_re.type_id_c128(), platform="CUDA")
+register_ffi("solve_single_f32_re", single_solve_re, type="f32")
+register_ffi("solve_single_f64_re", single_solve_re, type="f64")
+register_ffi("solve_single_c64_re", single_solve_re, type="c64")
+register_ffi("solve_single_c128_re", single_solve_re, type="c128")
 
 solve_single_f32_re_low = mlir.lower_fun(solve_single_f32_re_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_re_p, solve_single_f32_re_low)
@@ -204,50 +218,3 @@ class CuDSSSolverRE:
 
     def __call__(self, b, csr_values):
         return self._solve_fn(b, csr_values)   
-
-if __name__ == "__main__":
-    
-    import jax.experimental.sparse as jsparse
-
-    # example usage
-    # -------------
-    M1 = jnp.array([
-        [4., 0., 1., 0., 0.],
-        [0., 3., 2., 0., 0.],
-        [0., 0., 5., 0., 1.],
-        [0., 0., 0., 1., 0.],
-        [0., 0., 0., 0., 2.],
-    ])
-    M2 = M1 * 0.9
-
-    b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
-    b2 = b1 * 1.1
-
-    m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
-    m2 = M2 + M2.T - jnp.diag(M2) * jnp.eye(M2.shape[0])
-    true_x1 = jnp.linalg.solve(m1, b1)
-    true_x2 = jnp.linalg.solve(m2, b2)
-
-    LHS1 = jsparse.BCSR.fromdense(M1)
-    LHS2 = jsparse.BCSR.fromdense(M2)
-    csr_offsets1, csr_columns1, csr_values1 = LHS1.indptr, LHS1.indices, LHS1.data
-    csr_offsets2, csr_columns2, csr_values2 = LHS2.indptr, LHS2.indices, LHS2.data
-
-    assert all(csr_offsets1 == csr_offsets2)
-    assert all(csr_columns1 == csr_columns2)
-
-    batch_size = 2
-    offsets_batch = jnp.vstack([csr_offsets1, csr_offsets2])
-    columns_batch = jnp.vstack([csr_columns1, csr_columns2])
-    csr_values = jnp.vstack([csr_values1, csr_values2])
-    device_id = 0; mtype_id = 1; mview_id = 1
-    b = jnp.vstack([b1, b2])
-
-    # instantiate solve
-    solver = CuDSSSolverRE(csr_offsets1, csr_columns1, device_id, mtype_id, mview_id)
-
-    x, lu_nnz, npivots, inertia, perm_reorder_row, perm_reorder_col, perm_row, \
-    perm_col, perm_matching, diag, scale_row, scale_col, elimination_tree, \
-    nsuperpanels, schur_shape = solver(b[0], csr_values[0])
-
-    pass

@@ -3,8 +3,10 @@ batched outputs to support inertia retrieval*/
 
 #include <cstdint>
 #include <memory>
-#include <vector>
-#include <complex>
+#include <utility>
+// For debugging
+// #include <vector>
+// #include <complex>
 
 #include "cuda_runtime_api.h"
 #include "nanobind/nanobind.h"
@@ -19,50 +21,50 @@ namespace nb = nanobind;
     do { \
         status = call; \
         if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("Example FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            printf("FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
             return ffi::Error::Success(); \
         } \
     } while(0);
 
 // debugging ===================================================================
-template <typename T>
-void print_device_data(
-    const char* label,
-    void* device_ptr,
-    size_t n_batch,
-    size_t n_elements_per_batch)
-{
-    // Ensure we have a valid pointer and something to print
-    if (!device_ptr || n_batch == 0 || n_elements_per_batch == 0) return;
+// template <typename T>
+// void print_device_data(
+    // const char* label,
+    // void* device_ptr,
+    // size_t n_batch,
+    // size_t n_elements_per_batch)
+// {
+    // // Ensure we have a valid pointer and something to print
+    // if (!device_ptr || n_batch == 0 || n_elements_per_batch == 0) return;
 
-    std::cout << "\n--- Debug Print: " << label << " ---" << std::endl;
+    // std::cout << "\n--- Debug Print: " << label << " ---" << std::endl;
 
-    // Calculate total size and create a host-side vector
-    size_t total_elements = n_batch * n_elements_per_batch;
-    std::vector<T> host_data(total_elements);
+    // // Calculate total size and create a host-side vector
+    // size_t total_elements = n_batch * n_elements_per_batch;
+    // std::vector<T> host_data(total_elements);
 
-    // Copy all data from GPU to CPU in one go
-    cudaMemcpy(
-        host_data.data(),
-        device_ptr,
-        total_elements * sizeof(T),
-        cudaMemcpyDeviceToHost
-    );
+    // // Copy all data from GPU to CPU in one go
+    // cudaMemcpy(
+        // host_data.data(),
+        // device_ptr,
+        // total_elements * sizeof(T),
+        // cudaMemcpyDeviceToHost
+    // );
 
-    // Loop through each batch and print its contents
-    for (size_t i = 0; i < n_batch; ++i) {
-        std::cout << "Batch " << i << ": [";
-        size_t batch_start_index = i * n_elements_per_batch;
-        for (size_t j = 0; j < n_elements_per_batch; ++j) {
-            std::cout << host_data[batch_start_index + j];
-            if (j < n_elements_per_batch - 1) {
-                std::cout << ", ";
-            }
-        }
-        std::cout << "]" << std::endl;
-    }
-    std::cout << "------------------------------------" << std::endl;
-}
+    // // Loop through each batch and print its contents
+    // for (size_t i = 0; i < n_batch; ++i) {
+        // std::cout << "Batch " << i << ": [";
+        // size_t batch_start_index = i * n_elements_per_batch;
+        // for (size_t j = 0; j < n_elements_per_batch; ++j) {
+            // std::cout << host_data[batch_start_index + j];
+            // if (j < n_elements_per_batch - 1) {
+                // std::cout << ", ";
+            // }
+        // }
+        // std::cout << "]" << std::endl;
+    // }
+    // std::cout << "------------------------------------" << std::endl;
+// }
 
 
 // Helper function for data types ==============================================
@@ -72,12 +74,12 @@ template<> cudaDataType get_cuda_data_type<ffi::F64>() { return CUDA_R_64F; }
 template<> cudaDataType get_cuda_data_type<ffi::C64>() { return CUDA_C_32F; }
 template<> cudaDataType get_cuda_data_type<ffi::C128>() { return CUDA_C_64F; }
 
-template <ffi::DataType T>
-struct get_native_data_type;
-template<> struct get_native_data_type<ffi::F32> { using type = float; };
-template<> struct get_native_data_type<ffi::F64> { using type = double; };
-template<> struct get_native_data_type<ffi::C64> { using type = std::complex<float>; };
-template<> struct get_native_data_type<ffi::C128> { using type = std::complex<double>; };
+// template <ffi::DataType T>
+// struct get_native_data_type;
+// template<> struct get_native_data_type<ffi::F32> { using type = float; };
+// template<> struct get_native_data_type<ffi::F64> { using type = double; };
+// template<> struct get_native_data_type<ffi::C64> { using type = std::complex<float>; };
+// template<> struct get_native_data_type<ffi::C128> { using type = std::complex<double>; };
 
 // Structure definitions =======================================================
 template <ffi::DataType T>
@@ -93,19 +95,25 @@ struct CudssBatchState {
     cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;
     cudssIndexBase_t base = CUDSS_BASE_ZERO;
     cudssStatus_t status = CUDSS_STATUS_SUCCESS;
-    int64_t n;
-    int64_t nnz;
-    int64_t nrhs;
-    int32_t ubatch_size; // this must be int32_t or cuDSS will error
+    cudaStream_t last_stream = nullptr; // track stream for synchronization
+    int64_t n = 0;
+    int64_t nnz = 0;
+    int64_t nrhs = 0;
+    int32_t ubatch_size = 0; // this must be int32_t or cuDSS will error
     int64_t call_count = 0; // necessary for detecting if we need further instantiation in execution stage
-    size_t sizeWritten;
+    size_t sizeWritten = 0;
     cudaDataType cuda_dtype = get_cuda_data_type<T>();
-
+    int32_t* cached_offsets_ptr = nullptr;
+    int32_t* cached_columns_ptr = nullptr;
     // this is literally only for debugging
-    using native_dtype = typename get_native_data_type<T>::type;
+    // using native_dtype = typename get_native_data_type<T>::type;
 
     ~CudssBatchState() {
         if (handle) {
+            // Synchronize with the last stream before destroying resources
+            if (last_stream) {
+                cudaStreamSynchronize(last_stream);
+            }
             // CuDSS destruction
             cudssMatrixDestroy(A);
             cudssMatrixDestroy(b);
@@ -127,10 +135,6 @@ template <> ffi::TypeId CudssBatchState<ffi::C128>::id = {};
 template <ffi::DataType T>
 static ffi::ErrorOr<std::unique_ptr<CudssBatchState<T>>> CudssInstantiate(
     const int64_t batch_size_64,               // need to know without other structural data
-    int32_t* offsets_ptr,                   // pointers and sizes of csr structure defn per batch element
-    const int64_t offsets_size,             // pointers and sizes of csr structure defn per batch element
-    int32_t* columns_ptr,                   // pointers and sizes of csr structure defn per batch element
-    const int64_t columns_size,             // pointers and sizes of csr structure defn per batch element
     const int64_t device_id,                // the device to run this on
     const int64_t mtype_id,                 // {0: gen, 1: sym, 2: herm, 3: spd, 4: hpd}
     const int64_t mview_id                  // {0: full, 1: triu, 2: tril}
@@ -175,8 +179,6 @@ static ffi::ErrorOr<std::unique_ptr<CudssBatchState<T>>> CudssInstantiate(
     }
 
     // Store uniform dimensions and batch size
-    state->n = offsets_size - 1;
-    state->nnz = columns_size;
     state->nrhs = 1;
 
     // Python ints are being passed as int64_t's
@@ -185,7 +187,7 @@ static ffi::ErrorOr<std::unique_ptr<CudssBatchState<T>>> CudssInstantiate(
     // CUDA setup can happen here before any cudaMallocs
     cudaSetDevice(device_id);
 
-    return state; // simply return the created CudssBatchState
+    return std::move(state); // simply return the created CudssBatchState
 }
 
 // execution ===================================================================
@@ -195,21 +197,24 @@ static ffi::Error CudssExecute(
     CudssBatchState<T>* state,                      // the state we instantiated in CudssInstantiate
     ffi::Buffer<T> b_values_buf,            // the real input data that varies per solution
     ffi::Buffer<T> csr_values_buf,          // the real input data that varies per solution
+    ffi::Buffer<ffi::S32> offsets_buf,
+    ffi::Buffer<ffi::S32> columns_buf,
     ffi::ResultBuffer<T> out_values_buf,    // the output buffer we write the answer to
     ffi::ResultBuffer<ffi::S32> inertia_buf,  // the output buffer we write the answer to
     const int64_t batch_size_64,               // need to know without other structural data
-    int32_t* offsets_ptr,             // pointers and sizes of csr structure defn
-    const int64_t offsets_size,             // pointers and sizes of csr structure defn
-    int32_t* columns_ptr,             // pointers and sizes of csr structure defn
-    const int64_t columns_size,             // pointers and sizes of csr structure defn
     const int64_t device_id,                    // the device to run this on
     const int64_t mtype_id,                     // {0: gen, 1: sym, 2: herm, 3: spd, 4: hpd}
     const int64_t mview_id                      // {0: full, 1: triu, 2: tril}
 ) {
     // printf("in execute \n");
-    // cudaStreamSynchronize(stream);
+    // Track stream for cleanup synchronization
+    state->last_stream = stream;
+
     if (state->call_count == 0) {
 
+        // Figure out structure on first call
+        state->n = offsets_buf.element_count() - 1;
+        state->nnz = columns_buf.element_count();
         // CuDSS setup
         CUDSS_CALL_AND_CHECK(cudssCreate(&state->handle), state->status, "cudssCreate");
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
@@ -225,11 +230,13 @@ static ffi::Error CudssExecute(
 
         // Use singular matrix creation APIs
         CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&state->A, state->n, state->n, state->nnz,
-            offsets_ptr, NULL,
-            columns_ptr,
+            offsets_buf.typed_data(), NULL,
+            columns_buf.typed_data(),
             csr_values_buf.typed_data(),
             CUDA_R_32I, state->cuda_dtype,
             state->mtype, state->mview, state->base), state->status, "cudssMatrixCreateCsr");
+        state->cached_offsets_ptr = offsets_buf.typed_data();
+        state->cached_columns_ptr = columns_buf.typed_data();
 
         // CuDSS config
         // uniform batch of size state->ubatch_size
@@ -260,8 +267,8 @@ static ffi::Error CudssExecute(
         // print_device_data<DType>("csr_values", csr_values_buf.typed_data(), state->ubatch_size, state->nnz);
         // print_device_data<DType>("b_values", b_values_buf.typed_data(), state->ubatch_size, state->n);
         // print_device_data<DType>("x_values", out_values_buf->typed_data(), state->ubatch_size, state->n);
-        // print_device_data<int32_t>("csr_offsets", offsets_ptr, 1, state->n+1);
-        // print_device_data<int32_t>("csr_columns", columns_ptr, 1, state->nnz);
+        // print_device_data<int32_t>("csr_offsets", offsets_buf.typed_data(), 1, state->n+1);
+        // print_device_data<int32_t>("csr_columns", columns_buf.typed_data(), 1, state->nnz);
 
         // so we dont init again...
         state->call_count++;
@@ -270,14 +277,40 @@ static ffi::Error CudssExecute(
         // stream can change between calls!!!
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 
-        // update the csr_values data on device - just overwrite prior pointers
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
+        if (offsets_buf.element_count() != state->n + 1 ||
+            columns_buf.element_count() != state->nnz) {
+            return ffi::Error::Internal("CSR pattern size changed; reinstantiate solver.");
+        }
+
+        int32_t* current_offsets_ptr = offsets_buf.typed_data();
+        int32_t* current_columns_ptr = columns_buf.typed_data();
+        bool pointers_changed = current_offsets_ptr != state->cached_offsets_ptr ||
+                                current_columns_ptr != state->cached_columns_ptr;
+        if (pointers_changed) {
+            printf("cudss batch: CSR pattern pointers changed\n");
+            state->cached_offsets_ptr = current_offsets_ptr;
+            state->cached_columns_ptr = current_columns_ptr;
+        }
+
+        // update CSR pointers on warm calls
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetCsrPointers(state->A,
+            offsets_buf.typed_data(), NULL,
+            columns_buf.typed_data(),
+            csr_values_buf.typed_data()), state->status, "update_pointers A");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
 
-        // warm solve - refactorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
-            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        if (pointers_changed) {
+            CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_ANALYSIS, 
+                state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute analysis");
+            CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_FACTORIZATION, 
+                state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute factorization");
+        }
+        else{
+            CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
+                state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        }
+
 
         CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
@@ -290,6 +323,14 @@ static ffi::Error CudssExecute(
     //                 diag_buf->size_bytes(), &state->sizeWritten);
     // cudssDataGet(state->handle, state->data, CUDSS_DATA_PERM_REORDER_ROW, perm_reorder_row_buf->typed_data(),
     //                 perm_reorder_row_buf->size_bytes(), &state->sizeWritten);
+
+    // cuDSS batch API does not expose diag/perm; return zeros for inertia.
+    cudaError_t memset_status = cudaMemsetAsync(
+        inertia_buf->typed_data(), 0, inertia_buf->size_bytes(), stream);
+    if (memset_status != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(memset_status));
+        return ffi::Error::Internal("cudaMemsetAsync failed for inertia buffer.");
+    }
 
     // cudaStreamSynchronize(stream);
 
@@ -304,10 +345,6 @@ static ffi::Error CudssExecute(
     XLA_FFI_DEFINE_HANDLER(kCudssInstantiate##TypeName, CudssInstantiate<DataType>, \
         ffi::Ffi::BindInstantiate() \
             .Attr<int64_t>("batch_size") \
-            .Attr<ffi::Pointer<int32_t>>("offsets_ptr") \
-            .Attr<int64_t>("offsets_size") \
-            .Attr<ffi::Pointer<int32_t>>("columns_ptr") \
-            .Attr<int64_t>("columns_size") \
             .Attr<int64_t>("device_id") \
             .Attr<int64_t>("mtype_id") \
             .Attr<int64_t>("mview_id")); \
@@ -318,14 +355,12 @@ static ffi::Error CudssExecute(
             .Ctx<ffi::State<CudssBatchState<DataType>>>() \
             .Arg<ffi::Buffer<DataType>>() \
             .Arg<ffi::Buffer<DataType>>() \
+            .Arg<ffi::Buffer<ffi::S32>>() \
+            .Arg<ffi::Buffer<ffi::S32>>() \
             .Ret<ffi::Buffer<DataType>>() \
             .Ret<ffi::Buffer<ffi::S32>>() \
             /* Attributes must also be passed to execute */ \
             .Attr<int64_t>("batch_size") \
-            .Attr<ffi::Pointer<int32_t>>("offsets_ptr") \
-            .Attr<int64_t>("offsets_size") \
-            .Attr<ffi::Pointer<int32_t>>("columns_ptr") \
-            .Attr<int64_t>("columns_size") \
             .Attr<int64_t>("device_id") \
             .Attr<int64_t>("mtype_id") \
             .Attr<int64_t>("mview_id"));
@@ -336,8 +371,26 @@ DEFINE_CUDSS_FFI_HANDLERS(f64, ffi::F64);
 DEFINE_CUDSS_FFI_HANDLERS(c64, ffi::C64);
 DEFINE_CUDSS_FFI_HANDLERS(c128, ffi::C128);
 
+#if defined(XLA_FFI_API_MINOR) && (XLA_FFI_API_MINOR >= 2)
+  #define ADD_TYPE(d, DTYPE) do { \
+      using StateT = CudssBatchState<DTYPE>; \
+      static auto kStateTypeInfo = xla::ffi::MakeTypeInfo<StateT>(); \
+      (d)["type_info"] = nb::capsule(reinterpret_cast<void*>(&kStateTypeInfo)); \
+      (d)["type_id"]   = nb::capsule(reinterpret_cast<void*>(&StateT::id)); \
+    } while (0)
+#else
+  #define ADD_TYPE(d, DTYPE) do { \
+      (d)["state_type"] = nb::dict(); \
+    } while (0)
+#endif
+
 // nanobind module exporting macro
 #define EXPORT_CUDSS_HANDLERS(m, TypeName, DataType) \
+    m.def("state_dict_" #TypeName, []() { \
+        nb::dict d; \
+        ADD_TYPE(d, DataType); \
+        return d; \
+    }); \
     m.def("type_id_" #TypeName, []() { \
         return nb::capsule(reinterpret_cast<void*>(&CudssBatchState<DataType>::id)); \
     }); \
@@ -347,6 +400,7 @@ DEFINE_CUDSS_FFI_HANDLERS(c128, ffi::C128);
         d["execute"] = nb::capsule(reinterpret_cast<void*>(kCudssExecute##TypeName)); \
         return d; \
     });
+
 
 // generate all nanobind modules! :)
 NB_MODULE(batch_solve, m) {
