@@ -1,0 +1,20 @@
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-dev python3.11-venv python3-pip git \
+    cmake ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment (uses site-packages, not dist-packages)
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /workspace
+COPY . .
+
+# Install build + CUDA dependencies first (needed at build time)
+RUN pip install --upgrade pip && \
+    pip install "scikit-build-core>=0.5" nanobind "jax[cuda12]>=0.5.0" nvidia-cudss-cu12 pytest && \
+    pip install --no-build-isolation --config-settings=cmake.args="-DBUILD_PBATCH_SOLVE=OFF" .[cuda12]
+
+CMD ["bash"]

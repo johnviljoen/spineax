@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # Test script to validate spineax builds and runs on both CUDA 12 and CUDA 13
-# Usage: ./tests/test_docker_cuda.sh [--cu12-only | --cu13-only] [--no-build]
+# Usage: ./tests/cudss/test_docker_cuda.sh [--cu12-only | --cu13-only] [--no-build]
 #
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 # Colors for output
 RED='\033[0;31m'
@@ -136,6 +136,85 @@ test_cuda_version() {
     done
 }
 
+build_image_no_pbatch() {
+    local cuda_version=$1
+    local dockerfile="${SCRIPT_DIR}/Dockerfile.cu${cuda_version}.no-pbatch"
+    local image_name="spineax-cu${cuda_version}-no-pbatch"
+
+    log_info "Building Docker image for CUDA ${cuda_version} (no pbatch)..."
+
+    if docker build -f "${dockerfile}" -t "${image_name}" "${PROJECT_ROOT}"; then
+        log_success "Built ${image_name}"
+        return 0
+    else
+        log_error "Failed to build ${image_name}"
+        return 1
+    fi
+}
+
+test_no_pbatch_fallback() {
+    local cuda_version=$1
+    local image_name="spineax-cu${cuda_version}-no-pbatch"
+
+    echo ""
+    echo "========================================"
+    echo " Testing CUDA ${cuda_version} (no pbatch - fallback)"
+    echo "========================================"
+    echo ""
+
+    if [ "$BUILD_IMAGES" = true ]; then
+        if ! build_image_no_pbatch "${cuda_version}"; then
+            log_error "Skipping no-pbatch tests due to build failure"
+            RESULTS["cu${cuda_version}:no-pbatch:fallback"]="SKIP"
+            FAILED=$((FAILED + 1))
+            return 1
+        fi
+    fi
+
+    # Test that PBATCH_AVAILABLE is False
+    log_info "Testing PBATCH_AVAILABLE=False on CUDA ${cuda_version} (no pbatch)..."
+    if docker run --rm --gpus all "${image_name}" python -c "
+from spineax.cudss import solver
+assert solver.PBATCH_AVAILABLE == False, 'PBATCH_AVAILABLE should be False'
+assert solver.vmap_using_pseudo_batch == False, 'vmap_using_pseudo_batch should be False'
+print('PBATCH_AVAILABLE:', solver.PBATCH_AVAILABLE)
+print('vmap_using_pseudo_batch:', solver.vmap_using_pseudo_batch)
+print('Fallback mode verified!')
+" 2>&1; then
+        log_success "CUDA ${cuda_version}: no-pbatch fallback verified"
+        RESULTS["cu${cuda_version}:no-pbatch:fallback"]="PASS"
+    else
+        log_error "CUDA ${cuda_version}: no-pbatch fallback test failed"
+        RESULTS["cu${cuda_version}:no-pbatch:fallback"]="FAIL"
+        FAILED=$((FAILED + 1))
+        return 1
+    fi
+
+    # Test that solve still works in fallback mode
+    log_info "Testing solve works in fallback mode on CUDA ${cuda_version}..."
+    if docker run --rm --gpus all "${image_name}" python -c "
+import jax.numpy as jnp
+import jax.experimental.sparse as jsparse
+from spineax.cudss.solver import CuDSSSolver
+
+A = jnp.array([[4., 0., 1.], [0., 3., 2.], [0., 0., 5.]], dtype=jnp.float32)
+b = jnp.array([5., 11., 14.], dtype=jnp.float32)
+LHS = jsparse.BCSR.fromdense(A)
+solver = CuDSSSolver(LHS.indptr, LHS.indices, 0, 1, 1)
+x, inertia = solver(b, LHS.data)
+print('Solution:', x)
+print('Solve works in fallback mode!')
+" 2>&1; then
+        log_success "CUDA ${cuda_version}: no-pbatch solve works"
+        RESULTS["cu${cuda_version}:no-pbatch:solve"]="PASS"
+    else
+        log_error "CUDA ${cuda_version}: no-pbatch solve failed"
+        RESULTS["cu${cuda_version}:no-pbatch:solve"]="FAIL"
+        FAILED=$((FAILED + 1))
+        return 1
+    fi
+}
+
 print_summary() {
     echo ""
     echo "========================================"
@@ -192,10 +271,12 @@ log_success "GPU access verified"
 # Run tests
 if [ "$RUN_CU12" = true ]; then
     test_cuda_version 12
+    test_no_pbatch_fallback 12
 fi
 
 if [ "$RUN_CU13" = true ]; then
     test_cuda_version 13
+    test_no_pbatch_fallback 13
 fi
 
 print_summary

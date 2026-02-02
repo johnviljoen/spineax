@@ -12,7 +12,13 @@ import equinox as eqx
 jax.devices()
 
 # Import the functions that return pointers from our compiled C++
-from spineax import single_solve, batch_solve, pbatch_solve
+from spineax import single_solve, batch_solve
+try:
+    from spineax import pbatch_solve
+    PBATCH_AVAILABLE = True
+except ImportError:
+    pbatch_solve = None
+    PBATCH_AVAILABLE = False
 
 # primitives ===================================================================
 # single
@@ -312,20 +318,21 @@ mlir.register_lowering(solve_batch_c64_p, solve_batch_c64_low)
 solve_batch_c128_low = mlir.lower_fun(solve_batch_c128_impl, multiple_results=True)
 mlir.register_lowering(solve_batch_c128_p, solve_batch_c128_low)
 
-# psuedo batch
-register_ffi("solve_pbatch_f32", pbatch_solve, type="f32")
-register_ffi("solve_pbatch_f64", pbatch_solve, type="f64")
-register_ffi("solve_pbatch_c64", pbatch_solve, type="c64")
-register_ffi("solve_pbatch_c128", pbatch_solve, type="c128")
+# psuedo batch (optional - may not be available if CUDA version mismatch)
+if PBATCH_AVAILABLE:
+    register_ffi("solve_pbatch_f32", pbatch_solve, type="f32")
+    register_ffi("solve_pbatch_f64", pbatch_solve, type="f64")
+    register_ffi("solve_pbatch_c64", pbatch_solve, type="c64")
+    register_ffi("solve_pbatch_c128", pbatch_solve, type="c128")
 
-solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
-solve_pbatch_f64_low = mlir.lower_fun(solve_pbatch_f64_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_f64_p, solve_pbatch_f64_low)
-solve_pbatch_c64_low = mlir.lower_fun(solve_pbatch_c64_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_c64_p, solve_pbatch_c64_low)
-solve_pbatch_c128_low = mlir.lower_fun(solve_pbatch_c128_impl, multiple_results=True)
-mlir.register_lowering(solve_pbatch_c128_p, solve_pbatch_c128_low)
+    solve_pbatch_f32_low = mlir.lower_fun(solve_pbatch_f32_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_f32_p, solve_pbatch_f32_low)
+    solve_pbatch_f64_low = mlir.lower_fun(solve_pbatch_f64_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_f64_p, solve_pbatch_f64_low)
+    solve_pbatch_c64_low = mlir.lower_fun(solve_pbatch_c64_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_c64_p, solve_pbatch_c64_low)
+    solve_pbatch_c128_low = mlir.lower_fun(solve_pbatch_c128_impl, multiple_results=True)
+    mlir.register_lowering(solve_pbatch_c128_p, solve_pbatch_c128_low)
 
 # abstract evaluations =========================================================
 @solve_single_f32_p.def_abstract_eval
@@ -522,7 +529,15 @@ def solve_single_c64_vmap(vector_arg_values, batch_axes, **kwargs):
 def solve_single_c128_vmap(vector_arg_values, batch_axes, **kwargs):
     return general_solve_vmap(vector_arg_values, batch_axes, **kwargs)
 
-vmap_using_pseudo_batch = True
+# Use pseudo_batch if available (provides correct inertia), fall back to batch_solve otherwise
+vmap_using_pseudo_batch = PBATCH_AVAILABLE
+if not PBATCH_AVAILABLE:
+    import warnings
+    warnings.warn(
+        "pbatch_solve not available (CUDA version mismatch?). "
+        "Falling back to batch_solve. Batched inertia will not be computed correctly.",
+        RuntimeWarning
+    )
 
 def general_solve_vmap(
     vector_arg_values: tuple[Array, Array],     # [b_values, csr_values]
