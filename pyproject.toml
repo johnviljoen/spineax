@@ -1,1 +1,51 @@
-pyproject.toml.cu12
+[build-system]
+requires = [
+    "scikit-build-core >= 0.5",
+    "nanobind",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "spineax"
+version = "0.0.2"
+requires-python = ">=3.10"
+authors = [
+    {name = "John Viljoen"}
+]
+dependencies = [
+    "jaxtyping",
+    "equinox",
+]
+
+[project.optional-dependencies]
+cuda12 = [
+    "jax[cuda12]>=0.5.0",
+    "nvidia-cudss-cu12",
+]
+cuda13 = [
+    "jax[cuda13]>=0.8.0",
+    "nvidia-cudss-cu13",
+]
+dev = [
+    "nanobind",
+    "ninja",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+
+[tool.scikit-build.sdist]
+include = ["src/spineax/**", "CMakeLists.txt", "src/**/*.cpp", "src/**/*.cu"]
+
+[tool.scikit-build]
+minimum-version = "0.5"
+build-dir = "build/{wheel_tag}"
+editable.rebuild = true
+
+[tool.setuptools.packages.find]
+where = [
+    "src"
+]
