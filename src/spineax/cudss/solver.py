@@ -522,7 +522,7 @@ def solve_single_c64_vmap(vector_arg_values, batch_axes, **kwargs):
 def solve_single_c128_vmap(vector_arg_values, batch_axes, **kwargs):
     return general_solve_vmap(vector_arg_values, batch_axes, **kwargs)
 
-vmap_using_pseudo_batch = False
+vmap_using_pseudo_batch = True
 
 def general_solve_vmap(
     vector_arg_values: tuple[Array, Array],     # [b_values, csr_values]
