@@ -646,6 +646,8 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
             solver = solve_batch_c128_p
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
+        # Remove batch_size from kwargs if present (happens with nested vmap)
+        kwargs = {k: v for k, v in kwargs.items() if k != "batch_size"}
         return solver.bind(*vector_arg_values, batch_size=b_values.shape[0], **kwargs), (0,0)
     elif a_val is not None and a_b is not None and vmap_using_pseudo_batch is True:
         if csr_values.dtype == jnp.float32:
@@ -659,8 +661,8 @@ def solve_batch_vmap(vector_arg_values, batch_axes, **kwargs):
         else:
             raise ValueError(f"Unsupported dtype: {csr_values.dtype}")
 
-    # we are replacing this
-    kwargs.__delitem__("batch_size")
+    # Remove batch_size from kwargs if present (happens with nested vmap)
+    kwargs = {k: v for k, v in kwargs.items() if k != "batch_size"}
 
     x_flat, inertia_flat = solver.bind(
         b_flat, csr_flat, csr_offsets, csr_columns,
