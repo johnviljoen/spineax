@@ -148,6 +148,9 @@ endif()
 
 enable_language(CUDA)
 
+# Option to disable pbatch_solve (useful when nvcc version doesn't match CUDA runtime)
+option(BUILD_PBATCH_SOLVE "Build pseudo batch solve module (requires matching nvcc)" ON)
+
 # cuDSS FFI files
 
 # traditional batch
@@ -156,9 +159,11 @@ nanobind_add_module(batch_solve NOMINSIZE
 )
 
 # pseudo batch (enable features lacking in normal batch whilst also solving a batch)
-nanobind_add_module(pbatch_solve NOMINSIZE
-  src/spineax/cudss/pseudo_batch_solve.cu
-)
+if(BUILD_PBATCH_SOLVE)
+  nanobind_add_module(pbatch_solve NOMINSIZE
+    src/spineax/cudss/pseudo_batch_solve.cu
+  )
+endif()
 
 # single solve and Return Everything (return all data that cuDSS has)
 nanobind_add_module(single_solve_re NOMINSIZE
@@ -170,12 +175,13 @@ nanobind_add_module(single_solve NOMINSIZE
   src/spineax/cudss/single_solve.cpp
 )
 
-foreach(TARGET
-  batch_solve
-  pbatch_solve
-  single_solve
-  single_solve_re
-)
+# Build list of targets
+set(SPINEAX_TARGETS batch_solve single_solve single_solve_re)
+if(BUILD_PBATCH_SOLVE)
+  list(APPEND SPINEAX_TARGETS pbatch_solve)
+endif()
+
+foreach(TARGET ${SPINEAX_TARGETS})
   target_include_directories(${TARGET} PRIVATE
     ${XLA_DIR}
     nvidia::cudss
@@ -207,11 +213,7 @@ foreach(TARGET
 endforeach()
 
 install(
-  TARGETS
-    batch_solve
-    pbatch_solve
-    single_solve
-    single_solve_re
+  TARGETS ${SPINEAX_TARGETS}
   LIBRARY
   DESTINATION spineax
 )
