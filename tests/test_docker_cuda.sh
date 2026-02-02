@@ -53,6 +53,7 @@ done
 
 # Examples to test
 EXAMPLES=(
+    "examples/cudss/batched_rhs.py"
     "examples/cudss/composability.py"
     "examples/cudss/datatypes.py"
     "examples/cudss/outputs.py"
