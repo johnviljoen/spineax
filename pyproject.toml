@@ -2,6 +2,8 @@
 requires = [
     "scikit-build-core >= 0.5",
     "nanobind",
+    "jax>=0.4.29",
+    "nvidia-cudss-cu12; platform_system == 'Linux'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -44,6 +46,18 @@ include = ["src/spineax/**", "CMakeLists.txt", "src/**/*.cpp", "src/**/*.cu"]
 minimum-version = "0.5"
 build-dir = "build/{wheel_tag}"
 editable.rebuild = true
+cmake.build-type = "Release"
+
+[tool.cibuildwheel]
+# CUDA-only package: Linux x86_64 and aarch64
+build = ["cp311-*", "cp312-*"]
+skip = ["*-musllinux_*", "*-win*", "*_i686", "*-macosx_*"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.linux]
+# BUILD_PBATCH_SOLVE=OFF avoids needing nvcc; only .cpp modules are built
+environment = { CMAKE_ARGS = "-DBUILD_PBATCH_SOLVE=OFF" }
 
 [tool.setuptools.packages.find]
 where = [
