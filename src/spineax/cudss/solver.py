@@ -8,17 +8,26 @@ from jaxtyping import Array
 import numpy as np
 import equinox as eqx
 
-# Force JAX to initialize CUDA context BEFORE importing my C++ functions!!!!!!!!
+# Force JAX to initialize context BEFORE importing C++ modules
 jax.devices()
 
-# Import the functions that return pointers from our compiled C++
-from spineax import single_solve, batch_solve
+# CUDA modules - optional (only available when built with CUDA support)
+_CUDA_AVAILABLE = False
+PBATCH_AVAILABLE = False
+single_solve = None
+batch_solve = None
+pbatch_solve = None
 try:
-    from spineax import pbatch_solve
-    PBATCH_AVAILABLE = True
+    from spineax import single_solve, batch_solve
+    _CUDA_AVAILABLE = True
+    try:
+        from spineax import pbatch_solve
+        PBATCH_AVAILABLE = True
+    except ImportError:
+        pass
 except ImportError:
-    pbatch_solve = None
-    PBATCH_AVAILABLE = False
+    import warnings
+    warnings.warn("CUDA backend not available. Sparse solving requires CUDA.")
 
 # primitives ===================================================================
 # single
@@ -270,29 +279,21 @@ def general_pbatch_solve_impl(
     return [x, inertia]
 
 # registrations and lowerings ==================================================
-try:
-    from jax._src.lib import jaxlib_extension_version
-    _NEW_FFI_API = jaxlib_extension_version >= 381
-except ImportError:
-    _NEW_FFI_API = False
 
 
 def register_ffi(name: str, func, *, type: str, platform: str = "CUDA"):
     handler = getattr(func, f"handler_{type}")()
     state_dict = getattr(func, f"state_dict_{type}")()
-    type_id = getattr(func, f"type_id_{type}")()
-    if _NEW_FFI_API:
-        jax.ffi.register_ffi_type(name, state_dict, platform=platform)
-    else:
-        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    jax.ffi.register_ffi_type(name, state_dict, platform=platform)
     # order matters, ffi_target needs to be registered after type
     jax.ffi.register_ffi_target(name, handler, platform=platform)
 
 # single
-register_ffi("solve_single_f32", single_solve, type="f32")
-register_ffi("solve_single_f64", single_solve, type="f64")
-register_ffi("solve_single_c64", single_solve, type="c64")
-register_ffi("solve_single_c128", single_solve, type="c128")
+if _CUDA_AVAILABLE:
+    register_ffi("solve_single_f32", single_solve, type="f32")
+    register_ffi("solve_single_f64", single_solve, type="f64")
+    register_ffi("solve_single_c64", single_solve, type="c64")
+    register_ffi("solve_single_c128", single_solve, type="c128")
 
 solve_single_f32_low = mlir.lower_fun(solve_single_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_single_f32_p, solve_single_f32_low)
@@ -304,10 +305,11 @@ solve_single_c128_low = mlir.lower_fun(solve_single_c128_impl, multiple_results=
 mlir.register_lowering(solve_single_c128_p, solve_single_c128_low)
 
 # batch
-register_ffi("solve_batch_f32", batch_solve, type="f32")
-register_ffi("solve_batch_f64", batch_solve, type="f64")
-register_ffi("solve_batch_c64", batch_solve, type="c64")
-register_ffi("solve_batch_c128", batch_solve, type="c128")
+if _CUDA_AVAILABLE:
+    register_ffi("solve_batch_f32", batch_solve, type="f32")
+    register_ffi("solve_batch_f64", batch_solve, type="f64")
+    register_ffi("solve_batch_c64", batch_solve, type="c64")
+    register_ffi("solve_batch_c128", batch_solve, type="c128")
 
 solve_batch_f32_low = mlir.lower_fun(solve_batch_f32_impl, multiple_results=True)
 mlir.register_lowering(solve_batch_f32_p, solve_batch_f32_low)

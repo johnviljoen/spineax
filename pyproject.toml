@@ -2,6 +2,11 @@
 requires = [
     "scikit-build-core >= 0.5",
     "nanobind",
+    "jax>=0.4.29",
+    "nvidia-cudss-cu12; platform_system == 'Linux'",
+    "nvidia-cuda-runtime-cu12; platform_system == 'Linux'",
+    "nvidia-cuda-nvcc-cu12; platform_system == 'Linux'",
+    "nvidia-cublas-cu12; platform_system == 'Linux'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -44,8 +49,20 @@ include = ["src/spineax/**", "CMakeLists.txt", "src/**/*.cpp", "src/**/*.cu"]
 minimum-version = "0.5"
 build-dir = "build/{wheel_tag}"
 editable.rebuild = true
+cmake.build-type = "Release"
 
-[tool.setuptools.packages.find]
-where = [
-    "src"
-]
+[tool.cibuildwheel]
+build = ["cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*"]
+skip = ["*-musllinux_*", "*-win*", "*_i686", "*-macosx_*"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.linux]
+# BUILD_PBATCH_SOLVE=OFF avoids needing nvcc; only .cpp modules are built
+environment = { CMAKE_ARGS = "-DBUILD_PBATCH_SOLVE=OFF" }
+# Exclude NVIDIA/CUDA shared libs from auditwheel — they're provided at runtime
+# by nvidia-cublas-cu12, nvidia-cuda-runtime-cu12, nvidia-cudss-cu12 pip packages
+repair-wheel-command = "auditwheel repair --exclude libcublas.so.12 --exclude libcudart.so.12 --exclude libcudss.so.0 -w {dest_dir} {wheel}"
+
+[tool.scikit-build.wheel]
+packages = ["src/spineax"]

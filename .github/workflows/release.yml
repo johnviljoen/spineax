@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # Build CUDA wheels (Linux only — CUDA is not available on macOS/Windows)
+  build-wheels:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.22
+        with:
+          output-dir: dist
+
+      - name: Validate wheel contents
+        run: |
+          for WHEEL in dist/*.whl; do
+            echo "Checking: $WHEEL"
+            MISSING=()
+            for path in \
+              spineax/__init__.py \
+              spineax/cudss/__init__.py \
+              spineax/cudss/solver.py \
+              spineax/cudss/solver_re.py \
+            ; do
+              if ! python3 -c "import zipfile; z=zipfile.ZipFile('$WHEEL'); z.getinfo('$path')" 2>/dev/null; then
+                MISSING+=("$path")
+              fi
+            done
+            if ! python3 -c "
+          import zipfile, sys
+          z = zipfile.ZipFile('$WHEEL')
+          so_files = [n for n in z.namelist() if n.endswith('.so')]
+          if not so_files:
+              sys.exit(1)
+          print(f'  {len(so_files)} compiled module(s)')
+          "; then
+              MISSING+=("*.so (compiled modules)")
+            fi
+            if [ ${#MISSING[@]} -gt 0 ]; then
+              echo "ERROR: Missing in $WHEEL:"
+              printf '  - %s\n' "${MISSING[@]}"
+              exit 1
+            fi
+          done
+          echo "All wheels validated"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.whl
+
+  # Build source distribution
+  build-sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+
+      - name: Build sdist
+        run: uv build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Publish to TestPyPI
+  publish-testpypi:
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+
+  # Publish to PyPI (manual approval gate)
+  publish-pypi:
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    environment: pypi  # Requires manual approval
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Create GitHub Release
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*

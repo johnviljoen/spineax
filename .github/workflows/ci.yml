@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    strategy:
+      matrix:
+        python: ["cp312"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@v2.22
+        env:
+          CIBW_BUILD: "${{ matrix.python }}-manylinux_x86_64"
+        with:
+          output-dir: dist
+
+      - name: Validate wheel contents
+        run: |
+          WHEEL=$(find dist -name '*.whl' -print -quit)
+          echo "Checking wheel: $WHEEL"
+
+          # List contents for debugging
+          python3 -m zipfile -l "$WHEEL"
+
+          # Check required Python files exist in the wheel
+          MISSING=()
+          for path in \
+            spineax/__init__.py \
+            spineax/cudss/__init__.py \
+            spineax/cudss/solver.py \
+            spineax/cudss/solver_re.py \
+          ; do
+            if ! python3 -c "import zipfile; z=zipfile.ZipFile('$WHEEL'); z.getinfo('$path')" 2>/dev/null; then
+              MISSING+=("$path")
+            fi
+          done
+
+          # Check at least one compiled module exists
+          if ! python3 -c "
+          import zipfile, sys
+          z = zipfile.ZipFile('$WHEEL')
+          so_files = [n for n in z.namelist() if n.endswith('.so')]
+          if not so_files:
+              print('ERROR: No compiled .so modules found in wheel', file=sys.stderr)
+              sys.exit(1)
+          print(f'Found {len(so_files)} compiled module(s): {so_files}')
+          "; then
+            MISSING+=("*.so (compiled modules)")
+          fi
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ERROR: Missing files in wheel:"
+            printf '  - %s\n' "${MISSING[@]}"
+            exit 1
+          fi
+
+          echo "Wheel validation passed"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.python }}
+          path: dist/*.whl
+
+  import-test:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-cp312
+          path: dist
+
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+
+      - name: Install wheel and dependencies
+        run: |
+          uv venv --python 3.12
+          uv pip install dist/*.whl jax jaxtyping equinox
+
+      - name: Smoke test imports
+        run: |
+          uv run python -c "
+          import spineax
+          print('spineax imported OK')
+
+          from spineax.cudss import solver
+          print('spineax.cudss.solver imported OK')
+
+          # Verify CUDA is not available (no GPU in CI)
+          assert not solver._CUDA_AVAILABLE, 'Expected _CUDA_AVAILABLE=False in CI'
+          print(f'_CUDA_AVAILABLE={solver._CUDA_AVAILABLE} (expected)')
+
+          # Verify PBATCH_AVAILABLE is defined and False
+          assert not solver.PBATCH_AVAILABLE, 'Expected PBATCH_AVAILABLE=False in CI'
+          print(f'PBATCH_AVAILABLE={solver.PBATCH_AVAILABLE} (expected)')
+
+          print('All import smoke tests passed')
+          "

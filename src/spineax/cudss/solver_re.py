@@ -96,21 +96,10 @@ def general_single_solve_impl(
 
 # registrations and lowerings ==================================================
 
-try:
-    from jax._src.lib import jaxlib_extension_version
-    _NEW_FFI_API = jaxlib_extension_version >= 381
-except ImportError:
-    _NEW_FFI_API = False
-
-
 def register_ffi(name: str, func, *, type: str, platform: str = "CUDA"):
     handler = getattr(func, f"handler_{type}")()
     state_dict = getattr(func, f"state_dict_{type}")()
-    type_id = getattr(func, f"type_id_{type}")()
-    if _NEW_FFI_API:
-        jax.ffi.register_ffi_type(name, state_dict, platform=platform)
-    else:
-        jax.ffi.register_ffi_type_id(name, type_id, platform=platform)
+    jax.ffi.register_ffi_type(name, state_dict, platform=platform)
     # order matters, ffi_target needs to be registered after type
     jax.ffi.register_ffi_target(name, handler, platform=platform)
 

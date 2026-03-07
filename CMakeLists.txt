@@ -146,10 +146,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-enable_language(CUDA)
-
 # Option to disable pbatch_solve (useful when nvcc version doesn't match CUDA runtime)
+# When OFF, enable_language(CUDA) is not required, so nvcc is not needed.
 option(BUILD_PBATCH_SOLVE "Build pseudo batch solve module (requires matching nvcc)" ON)
+
+if(BUILD_PBATCH_SOLVE)
+  enable_language(CUDA)
+endif()
 
 # cuDSS FFI files
 
@@ -184,9 +187,6 @@ endif()
 foreach(TARGET ${SPINEAX_TARGETS})
   target_include_directories(${TARGET} PRIVATE
     ${XLA_DIR}
-    nvidia::cudss
-    nvidia::cudart
-    nvidia::cublas
     ${ENV_NVIDIA_INCLUDE_DIRS}
   )
 
