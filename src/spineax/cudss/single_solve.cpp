@@ -112,6 +112,14 @@ struct CudssState {
     size_t sizeWritten = 0;
     cudaDataType cuda_dtype = get_cuda_data_type<T>();
 
+    // Owned device buffers used as cuDSS input/output, so the descriptor
+    // pointers seen by cudssExecute() stay stable across solves.
+    void* offsets_dev = nullptr;
+    void* columns_dev = nullptr;
+    void* values_dev  = nullptr;
+    void* b_dev       = nullptr;
+    void* x_dev       = nullptr;
+
     // this is literally only for debugging
     using native_dtype = typename get_native_data_type<T>::type;
 
@@ -128,6 +136,11 @@ struct CudssState {
             cudssConfigDestroy(config);
             cudssDestroy(handle);
         }
+        if (offsets_dev) cudaFree(offsets_dev);
+        if (columns_dev) cudaFree(columns_dev);
+        if (values_dev)  cudaFree(values_dev);
+        if (b_dev)       cudaFree(b_dev);
+        if (x_dev)       cudaFree(x_dev);
     }
 };
 
@@ -217,6 +230,9 @@ static ffi::Error CudssExecute(
     // Track stream for cleanup synchronization
     state->last_stream = stream;
 
+    using T_native = typename get_native_data_type<T>::type;
+    const size_t T_size = sizeof(T_native);
+
     // instantiate system branch
     if (state->call_count == 0) {
 
@@ -230,17 +246,34 @@ static ffi::Error CudssExecute(
         CUDSS_CALL_AND_CHECK(cudssConfigCreate(&state->config), state->status, "cudssConfigCreate");
         CUDSS_CALL_AND_CHECK(cudssDataCreate(state->handle, &state->data), state->status, "cudssDataCreate");
 
-        // CuDSS structures creation
+        // Own the buffers cuDSS sees so its iterative-refinement pointer cache
+        // (set up during ANALYSIS) stays valid even when the caller's GPU
+        // buffers move between solves.
+        CUDA_CHECK(cudaMallocAsync(&state->offsets_dev, sizeof(int32_t) * (state->n + 1), stream));
+        CUDA_CHECK(cudaMallocAsync(&state->columns_dev, sizeof(int32_t) * state->nnz,      stream));
+        CUDA_CHECK(cudaMallocAsync(&state->values_dev,  T_size           * state->nnz,      stream));
+        CUDA_CHECK(cudaMallocAsync(&state->b_dev,       T_size           * state->n,        stream));
+        CUDA_CHECK(cudaMallocAsync(&state->x_dev,       T_size           * state->n,        stream));
+
+        CUDA_CHECK(cudaMemcpyAsync(state->offsets_dev, offsets_buf.typed_data(),
+                                   sizeof(int32_t) * (state->n + 1), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->columns_dev, columns_buf.typed_data(),
+                                   sizeof(int32_t) * state->nnz,      cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->values_dev,  csr_values_buf.typed_data(),
+                                   T_size           * state->nnz,      cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->b_dev,       b_values_buf.typed_data(),
+                                   T_size           * state->n,        cudaMemcpyDeviceToDevice, stream));
+
         CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&state->b, state->n, state->nrhs, state->n,
-            b_values_buf.typed_data(), state->cuda_dtype, CUDSS_LAYOUT_COL_MAJOR), state->status, "cudssMatrixCreateDn for b");
+            state->b_dev, state->cuda_dtype, CUDSS_LAYOUT_COL_MAJOR), state->status, "cudssMatrixCreateDn for b");
 
         CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&state->x, state->n, state->nrhs, state->n,
-            out_values_buf->typed_data(), state->cuda_dtype, CUDSS_LAYOUT_COL_MAJOR), state->status, "cudssMatrixCreateDn for x");
+            state->x_dev, state->cuda_dtype, CUDSS_LAYOUT_COL_MAJOR), state->status, "cudssMatrixCreateDn for x");
 
         CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&state->A, state->n, state->n, state->nnz,
-            offsets_buf.typed_data(), NULL,
-            columns_buf.typed_data(),
-            csr_values_buf.typed_data(),
+            state->offsets_dev, NULL,
+            state->columns_dev,
+            state->values_dev,
             CUDA_R_32I, state->cuda_dtype,
             state->mtype, state->mview, state->base), state->status, "cudssMatrixCreateCsr");
 
@@ -259,30 +292,34 @@ static ffi::Error CudssExecute(
 
         CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
-        
+
         state->call_count++;
     }
     else {
-        // stream can change between calls!!!
+        // stream can change between calls
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 
-        // set the values of the matrices - different to my batched solution
-        // CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetCsrPointers(state->A,
-            offsets_buf.typed_data(), NULL,
-            columns_buf.typed_data(),
-            csr_values_buf.typed_data()), state->status, "update_pointers A");
+        // Refresh the owned buffers from the caller's; the descriptors keep
+        // their original (stable) pointers, so cuDSS sees no movement.
+        CUDA_CHECK(cudaMemcpyAsync(state->offsets_dev, offsets_buf.typed_data(),
+                                   sizeof(int32_t) * (state->n + 1), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->columns_dev, columns_buf.typed_data(),
+                                   sizeof(int32_t) * state->nnz,      cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->values_dev,  csr_values_buf.typed_data(),
+                                   T_size           * state->nnz,      cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(state->b_dev,       b_values_buf.typed_data(),
+                                   T_size           * state->n,        cudaMemcpyDeviceToDevice, stream));
 
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
-
-        // warm solve - refactorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
 
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
     }
+
+    // Hand the solution back to the caller's output buffer.
+    CUDA_CHECK(cudaMemcpyAsync(out_values_buf->typed_data(), state->x_dev,
+                               T_size * state->n, cudaMemcpyDeviceToDevice, stream));
 
     // Diagnostic extraction - these can fail for certain matrix types (e.g., general non-SPD)
     // Don't fail the solve, just warn and continue with zeros
