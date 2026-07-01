@@ -181,10 +181,8 @@ def solve(
         mview_id
     ):
     if csr_values.dtype == jnp.float32:
-        print(f"solving with float32")
         solver = solve_single_f32_re_p
     elif csr_values.dtype == jnp.float64:
-        print(f"solving with float64")
         solver = solve_single_f64_re_p
     elif csr_values.dtype == jnp.complex64:
         solver = solve_single_c64_re_p

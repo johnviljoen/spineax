@@ -188,8 +188,13 @@ nanobind_add_module(single_solve NOMINSIZE
   src/spineax/cudss/single_solve.cpp
 )
 
+# persistent factorization: factor once, solve many (different RHS)
+nanobind_add_module(factor_solve NOMINSIZE
+  src/spineax/cudss/factor_solve.cpp
+)
+
 # Build list of targets
-set(SPINEAX_TARGETS batch_solve single_solve single_solve_re)
+set(SPINEAX_TARGETS batch_solve single_solve single_solve_re factor_solve)
 if(BUILD_PBATCH_SOLVE)
   list(APPEND SPINEAX_TARGETS pbatch_solve)
 endif()
