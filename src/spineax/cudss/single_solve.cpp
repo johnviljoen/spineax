@@ -276,11 +276,24 @@ static ffi::Error CudssExecute(
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
         CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
 
-        // warm solve - refactorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION, 
-            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
+        // Re-run ANALYSIS every call, not just REFACTORIZATION. REFACTORIZATION
+        // reuses the symbolic factorization (elimination tree / fill pattern)
+        // from the first call, which is only valid if the sparsity STRUCTURE is
+        // unchanged. But when the CSR structure is a runtime operand (feax's
+        // TracedStructure path), XLA reuses one compiled executable — and this
+        // per-executable FFI state — across two *different* same-shape systems
+        // (e.g. two distinct narrow-band sub-meshes). Reusing the first system's
+        // symbolic for the second produces wrong results / NaNs. Re-analysing
+        // with the current buffers each call is unconditionally correct. (For a
+        // fixed structure across many solves, use the explicit factor_solve
+        // factorize/solve_with reuse path instead.)
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_ANALYSIS,
+            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute re-analysis");
 
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_FACTORIZATION,
+            state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute factorization");
+
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
     }
 
