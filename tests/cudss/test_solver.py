@@ -1127,3 +1127,29 @@ def test_numeric_phases_rename():
     x0 = cudss.solve(t0, b)
     assert _rel_err(2.0 * A, x1, b) < _TOL[jnp.float64]
     assert _rel_err(A, x0, b) < _TOL[jnp.float64]
+
+
+def test_concurrent_refactors_branch_from_one_token():
+    from concurrent.futures import ThreadPoolExecutor
+
+    _require_gpu()
+    values, offsets, columns, A = _sym_system(n=80, seed=35)
+    b = jnp.asarray(np.random.default_rng(36).standard_normal(A.shape[0]))
+    token = cudss.factorize(cudss.analyze(values, offsets, columns), values)
+
+    # Compile before dispatching the same resident state from two host threads.
+    warm = cudss.refactorize(token, 1.5 * values)
+    warm.id.block_until_ready()
+    token = cudss.factorize(cudss.analyze(values, offsets, columns), values)
+
+    def branch(scale):
+        result = cudss.refactorize(token, scale * values)
+        result.id.block_until_ready()
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        branches = list(pool.map(branch, (2.0, 3.0)))
+
+    for scale, result in zip((2.0, 3.0), branches):
+        assert _rel_err(scale * A, cudss.solve(result, b), b) < _TOL[jnp.float64]
+    assert _rel_err(A, cudss.solve(token, b), b) < _TOL[jnp.float64]

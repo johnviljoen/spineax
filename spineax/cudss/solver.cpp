@@ -51,7 +51,23 @@ template<> struct get_native_data_type<ffi::C128> { using type = std::complex<do
     }                                                           \
   } while (0)
 
+static ffi::Error validate_ffi_device(const int64_t device_id) {
+    int current_device = -1;
+    cudaError_t status = cudaGetDevice(&current_device);
+    if (status != cudaSuccess) {
+        return ffi::Error::Internal(
+            std::string("spineax token: cudaGetDevice failed: ") +
+            cudaGetErrorString(status));
+    }
+    if (current_device != device_id) {
+        return ffi::Error::Internal(
+            "spineax token: configured device does not match the FFI stream device");
+    }
+    return ffi::Error::Success();
+}
+
 struct BatchFactorEntry {
+    std::mutex operation_mu;
     cudssHandle_t handle = nullptr;
     cudssConfig_t config = nullptr;
     cudssData_t   data   = nullptr;
@@ -68,6 +84,9 @@ struct BatchFactorEntry {
     int64_t device_id = 0;
 
     ~BatchFactorEntry() {
+        int previous_device = -1;
+        cudaGetDevice(&previous_device);
+        cudaSetDevice(static_cast<int>(device_id));
         if (done) {
             cudaEventSynchronize(done);  // an in-progress phase must finish
             cudaEventDestroy(done);      // before the factors are freed below
@@ -78,6 +97,7 @@ struct BatchFactorEntry {
         if (data && handle) cudssDataDestroy(handle, data);
         if (config) cudssConfigDestroy(config);
         if (handle) cudssDestroy(handle);
+        if (previous_device >= 0) cudaSetDevice(previous_device);
     }
 };
 
@@ -138,17 +158,29 @@ struct BatchTokenRegistry {
         lru.remove(id);
         return entries.erase(id) > 0;
     }
+    bool maps_to(int32_t id, const std::shared_ptr<BatchFactorEntry>& entry) {
+        std::lock_guard<std::mutex> lk(mu);
+        auto found = entries.find(id);
+        return found != entries.end() && found->second == entry;
+    }
     size_t size() {
         std::lock_guard<std::mutex> lk(mu);
         return entries.size();
     }
 };
 
+struct PhaseLease {
+    std::shared_ptr<BatchFactorEntry> entry;
+    std::unique_lock<std::mutex> operation_lk;
+    int32_t token_id = 0;
+};
+
 template <ffi::DataType T>
 static ffi::Error token_begin_phase(cudaStream_t stream,
                                     ffi::Buffer<ffi::S32>& token_buf,
-                                    std::shared_ptr<BatchFactorEntry>* out,
-                                    int32_t* id_out) {
+                                    const int64_t device_id,
+                                    PhaseLease* out) {
+    if (auto err = validate_ffi_device(device_id); err.failure()) return err;
     int64_t count = token_buf.element_count();
     std::vector<int32_t> ids(count);
     CUDA_TOKEN_CHECK(cudaMemcpyAsync(ids.data(), token_buf.typed_data(),
@@ -165,37 +197,48 @@ static ffi::Error token_begin_phase(cudaStream_t stream,
                 "batch-shaped values) so they share one block-diagonal entry.");
         }
     }
-    *id_out = ids[0];
-    std::shared_ptr<BatchFactorEntry> e;
-    {
+    out->token_id = ids[0];
+    while (true) {
+        std::shared_ptr<BatchFactorEntry> e;
         auto& r = BatchTokenRegistry::instance();
-        std::lock_guard<std::mutex> lk(r.mu);
-        auto it = r.entries.find(ids[0]);
-        if (it != r.entries.end()) {
-            r.lru.remove(ids[0]);
-            r.lru.push_front(ids[0]);
-            e = it->second;
+        {
+            std::lock_guard<std::mutex> lk(r.mu);
+            auto it = r.entries.find(ids[0]);
+            if (it != r.entries.end()) {
+                r.lru.remove(ids[0]);
+                r.lru.push_front(ids[0]);
+                e = it->second;
+            }
         }
+        // Not resident (renamed away or evicted) is not an error: the caller
+        // rebuilds from its own operands.
+        if (!e) return ffi::Error::Success();
+
+        std::unique_lock<std::mutex> operation_lk(e->operation_mu);
+        // A numeric phase may have rekeyed this entry while this thread was
+        // waiting. Retry the lookup so a diverged token rebuilds its own state.
+        if (!r.maps_to(ids[0], e)) continue;
+        if (e->device_id != device_id) {
+            return ffi::Error::Internal(
+                "spineax token: payload device differs from its factorization");
+        }
+        if (e->dtype != get_cudss_data_type<T>()) {
+            return ffi::Error::Internal(
+                "spineax pbatch token: dtype mismatch for token " +
+                std::to_string(ids[0]));
+        }
+        if (count != 1 && count != e->batch) {
+            return ffi::Error::Internal(
+                "spineax pbatch token: got " + std::to_string(count) +
+                " token ids for an entry with batch size " +
+                std::to_string(e->batch));
+        }
+        CUDA_TOKEN_CHECK(cudaStreamWaitEvent(stream, e->done, 0));
+        CUDSS_TOKEN_CHECK(cudssSetStream(e->handle, stream), "cudssSetStream");
+        out->entry = std::move(e);
+        out->operation_lk = std::move(operation_lk);
+        return ffi::Error::Success();
     }
-    // Not resident (renamed away or evicted) is not an error: *out stays
-    // null and the caller rebuilds from its own operands.
-    if (!e) return ffi::Error::Success();
-    if (e->dtype != get_cudss_data_type<T>()) {
-        return ffi::Error::Internal(
-            "spineax pbatch token: dtype mismatch for token " +
-            std::to_string(ids[0]));
-    }
-    if (count != 1 && count != e->batch) {
-        return ffi::Error::Internal(
-            "spineax pbatch token: got " + std::to_string(count) +
-            " token ids for an entry with batch size " +
-            std::to_string(e->batch));
-    }
-    CUDA_TOKEN_CHECK(cudaSetDevice(e->device_id));
-    CUDA_TOKEN_CHECK(cudaStreamWaitEvent(stream, e->done, 0));
-    CUDSS_TOKEN_CHECK(cudssSetStream(e->handle, stream), "cudssSetStream");
-    *out = std::move(e);
-    return ffi::Error::Success();
 }
 
 template <ffi::DataType T>
@@ -261,7 +304,7 @@ static ffi::Error create_entry(
     std::shared_ptr<BatchFactorEntry>* out
 ) {
     using nat = typename get_native_data_type<T>::type;
-    CUDA_TOKEN_CHECK(cudaSetDevice(device_id));
+    if (auto err = validate_ffi_device(device_id); err.failure()) return err;
 
     auto e = std::make_shared<BatchFactorEntry>();
     CUDA_TOKEN_CHECK(cudaEventCreateWithFlags(&e->done, cudaEventDisableTiming));
@@ -414,10 +457,10 @@ static ffi::Error PbatchTokenNumeric(
     const int64_t memory_id
 ) {
     auto& r = BatchTokenRegistry::instance();
-    std::shared_ptr<BatchFactorEntry> e;
-    int32_t id = 0;
-    if (auto err = token_begin_phase<T>(stream, token_in, &e, &id);
+    PhaseLease lease;
+    if (auto err = token_begin_phase<T>(stream, token_in, device_id, &lease);
         err.failure()) return err;
+    auto& e = lease.entry;
 
     const bool rebuilt = !e;
     if (rebuilt) {
@@ -445,7 +488,7 @@ static ffi::Error PbatchTokenNumeric(
 
     // A numeric phase consumes its input state's name: the entry moves to a
     // fresh id, so every id ever handed out names one immutable state.
-    int32_t new_id = rebuilt ? r.insert(e) : r.rekey(id, e);
+    int32_t new_id = rebuilt ? r.insert(e) : r.rekey(lease.token_id, e);
     return token_write_id(stream, token_out, new_id);
 }
 
@@ -466,10 +509,10 @@ static ffi::Error PbatchTokenSolve(
     const int64_t reordering_id,
     const int64_t memory_id
 ) {
-    std::shared_ptr<BatchFactorEntry> e;
-    int32_t id = 0;
-    if (auto err = token_begin_phase<T>(stream, token_in, &e, &id);
+    PhaseLease lease;
+    if (auto err = token_begin_phase<T>(stream, token_in, device_id, &lease);
         err.failure()) return err;
+    auto& e = lease.entry;
 
     if (!e) {
         // Not resident: rebuild the token's state — its values buffer is by
@@ -485,7 +528,7 @@ static ffi::Error PbatchTokenSolve(
             "cudssExecute factorization (rebuild)");
         auto& r = BatchTokenRegistry::instance();
         r.rebuilds.fetch_add(1);
-        r.insert(e, id);
+        r.insert(e, lease.token_id);
     } else {
         // SOLVE never reads A's values (spineax runs cuDSS-internal IR
         // permanently OFF; refinement is JAX-side in _refined_solve), but
@@ -556,10 +599,10 @@ static ffi::Error PbatchTokenQuery(
     const int64_t reordering_id,
     const int64_t memory_id
 ) {
-    std::shared_ptr<BatchFactorEntry> e;
-    int32_t id = 0;
-    if (auto err = token_begin_phase<T>(stream, token_in, &e, &id);
+    PhaseLease lease;
+    if (auto err = token_begin_phase<T>(stream, token_in, device_id, &lease);
         err.failure()) return err;
+    auto& e = lease.entry;
 
     if (!e) {
         // Same heal as solve: rebuild the token's factorized state from its
@@ -574,7 +617,7 @@ static ffi::Error PbatchTokenQuery(
             "cudssExecute factorization (rebuild)");
         auto& r = BatchTokenRegistry::instance();
         r.rebuilds.fetch_add(1);
-        r.insert(e, id);
+        r.insert(e, lease.token_id);
     } else {
         // repoint = size + structure-fingerprint validation (query reads no
         // buffers itself, but should reject tampered tokens like every phase)
