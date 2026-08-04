@@ -79,6 +79,13 @@ class FactorToken(eqx.Module):
     ``rebuild_count()`` counts the heals; a rising count means
     SPINEAX_FACTOR_CACHE is too small for the working set.
 
+    ``factorize`` from a consumed id is cheaper than a heal: if any LIVE
+    state shares the input's lineage (same ``analyze`` ancestry, verified by
+    structure fingerprint), its cuDSS analysis is reused and only a
+    factorization runs — so branching many factorizations from one analyzed
+    scope pays the analysis once. ``branch_count()`` counts these; the
+    consumed relative's token, if still held, self-heals on its next use.
+
     ``values``/``offsets``/``columns`` are zero-copy references to the
     caller's CSR arrays (the block pattern exactly as handed to ``analyze``,
     NOT the expanded block-diagonal form). They keep the CSR data alive as
@@ -972,6 +979,13 @@ def rebuild_count() -> int:
     A rising count means live tokens are being evicted and re-factorized —
     raise ``SPINEAX_FACTOR_CACHE`` to fit the working set."""
     return int(_ps.token_rebuild_count())
+
+
+def branch_count() -> int:
+    """Times ``factorize`` of a consumed id reused a live relative's analysis
+    instead of rebuilding (issue #27 tree/star reuse). Branches are the
+    feature working — they do NOT count in ``rebuild_count()``."""
+    return int(_ps.token_branch_count())
 
 
 # lineax front door — the default user-facing API ==============================

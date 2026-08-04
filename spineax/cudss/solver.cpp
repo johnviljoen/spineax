@@ -82,6 +82,7 @@ struct BatchFactorEntry {
     cudssMatrixType_t mtype = CUDSS_MTYPE_SYMMETRIC;
     cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;
     int64_t device_id = 0;
+    int32_t origin_id = 0;  // first id of this entry's lineage (set at insert)
 
     ~BatchFactorEntry() {
         int previous_device = -1;
@@ -110,8 +111,18 @@ struct BatchTokenRegistry {
     std::mutex mu;
     std::map<int32_t, std::shared_ptr<BatchFactorEntry>> entries;
     std::list<int32_t> lru;  // front = most recently used
+    // Lineage (issue #27): every rekey of an entry keeps its origin_id, and
+    // these maps let a factorize arriving with a consumed id find a LIVE
+    // relative whose cuDSS analysis it can reuse (branch) instead of paying
+    // a full re-analysis rebuild. Purely an optimization: any miss falls
+    // back to the rebuild path, which is always correct.
+    std::map<int32_t, int32_t> lineage;        // origin -> current resident id
+    std::map<int32_t, int32_t> retired;        // consumed id -> its origin
+    std::list<int32_t> retired_order;          // front = newest retired id
+    static constexpr size_t kRetiredCap = 4096;
     std::atomic<int32_t> next_id{1};
     std::atomic<int64_t> rebuilds{0};
+    std::atomic<int64_t> branches{0};
 
     static BatchTokenRegistry& instance() {
         static BatchTokenRegistry r;
@@ -130,15 +141,41 @@ struct BatchTokenRegistry {
         do { id = next_id.fetch_add(1); } while (id == 0 || entries.count(id));
         return id;
     }
+    // caller holds mu. Drop the origin->id lineage pointer if it names `id`.
+    void unlink_lineage_locked(int32_t id,
+                               const std::shared_ptr<BatchFactorEntry>& e) {
+        auto it = lineage.find(e->origin_id);
+        if (it != lineage.end() && it->second == id) lineage.erase(it);
+    }
+    // caller holds mu. Record `dead_id` -> origin so stale tokens can still
+    // find the lineage; capped FIFO so long rekey chains stay bounded (an
+    // aged-out id just loses the branch shortcut, never correctness).
+    void retire_locked(int32_t dead_id, int32_t origin) {
+        if (retired.emplace(dead_id, origin).second) {
+            retired_order.push_front(dead_id);
+            while (retired.size() > kRetiredCap) {
+                retired.erase(retired_order.back());
+                retired_order.pop_back();
+            }
+        } else {
+            retired[dead_id] = origin;
+        }
+    }
     // Register under `id` (0 = mint fresh), evicting LRU overflow.
     int32_t insert(std::shared_ptr<BatchFactorEntry> entry, int32_t id = 0) {
         std::lock_guard<std::mutex> lk(mu);
         while (entries.size() >= capacity() && !lru.empty()) {
             int32_t old = lru.back();
             lru.pop_back();
-            entries.erase(old);
+            auto it = entries.find(old);
+            if (it != entries.end()) {
+                unlink_lineage_locked(old, it->second);
+                entries.erase(it);
+            }
         }
         if (id == 0) id = fresh_id_locked();
+        if (entry->origin_id == 0) entry->origin_id = id;
+        lineage[entry->origin_id] = id;
         entries[id] = std::move(entry);
         lru.push_front(id);
         return id;
@@ -149,6 +186,9 @@ struct BatchTokenRegistry {
         entries.erase(old_id);
         lru.remove(old_id);
         int32_t id = fresh_id_locked();
+        if (e->origin_id == 0) e->origin_id = old_id;
+        retire_locked(old_id, e->origin_id);
+        lineage[e->origin_id] = id;
         entries[id] = e;
         lru.push_front(id);
         return id;
@@ -156,7 +196,32 @@ struct BatchTokenRegistry {
     bool release(int32_t id) {
         std::lock_guard<std::mutex> lk(mu);
         lru.remove(id);
-        return entries.erase(id) > 0;
+        auto it = entries.find(id);
+        if (it == entries.end()) return false;
+        unlink_lineage_locked(id, it->second);
+        entries.erase(it);
+        return true;
+    }
+    // Live relative of a consumed id's lineage, or nullptr (issue #27).
+    std::shared_ptr<BatchFactorEntry> lineage_lookup(int32_t stale_id,
+                                                     int32_t* out_id) {
+        std::lock_guard<std::mutex> lk(mu);
+        int32_t origin = 0;
+        if (lineage.count(stale_id)) {
+            origin = stale_id;
+        } else {
+            auto rit = retired.find(stale_id);
+            if (rit != retired.end()) origin = rit->second;
+        }
+        if (origin == 0) return nullptr;
+        auto lit = lineage.find(origin);
+        if (lit == lineage.end()) return nullptr;
+        auto eit = entries.find(lit->second);
+        if (eit == entries.end()) return nullptr;
+        *out_id = lit->second;
+        lru.remove(lit->second);
+        lru.push_front(lit->second);
+        return eit->second;
     }
     bool maps_to(int32_t id, const std::shared_ptr<BatchFactorEntry>& entry) {
         std::lock_guard<std::mutex> lk(mu);
@@ -174,6 +239,26 @@ struct PhaseLease {
     std::unique_lock<std::mutex> operation_lk;
     int32_t token_id = 0;
 };
+
+static bool mtype_from_id(int64_t mtype_id, cudssMatrixType_t* out) {
+    switch (mtype_id) {
+        case 0: *out = CUDSS_MTYPE_GENERAL; return true;
+        case 1: *out = CUDSS_MTYPE_SYMMETRIC; return true;
+        case 2: *out = CUDSS_MTYPE_HERMITIAN; return true;
+        case 3: *out = CUDSS_MTYPE_SPD; return true;
+        case 4: *out = CUDSS_MTYPE_HPD; return true;
+    }
+    return false;
+}
+
+static bool mview_from_id(int64_t mview_id, cudssMatrixViewType_t* out) {
+    switch (mview_id) {
+        case 0: *out = CUDSS_MVIEW_FULL; return true;
+        case 1: *out = CUDSS_MVIEW_UPPER; return true;
+        case 2: *out = CUDSS_MVIEW_LOWER; return true;
+    }
+    return false;
+}
 
 template <ffi::DataType T>
 static ffi::Error token_begin_phase(cudaStream_t stream,
@@ -239,6 +324,41 @@ static ffi::Error token_begin_phase(cudaStream_t stream,
         out->operation_lk = std::move(operation_lk);
         return ffi::Error::Success();
     }
+}
+
+// issue #27: a factorize whose input id was consumed (star/tree branching
+// from one analyzed scope) may run its FACTORIZATION on a LIVE entry of the
+// same lineage — cuDSS reuses that entry's analysis implicitly, so the
+// branch costs a factorization instead of a full re-analysis. The relative
+// is then rekeyed like any consumed state; if its previous token is still
+// held somewhere, its next use self-heals (existing machinery). Guards
+// mirror token_begin_phase; any failure leaves *out empty and the caller
+// takes the rebuild path, which is always correct.
+template <ffi::DataType T>
+static void try_lineage_steal(cudaStream_t stream, int32_t stale_id,
+                              int64_t token_count, const int64_t device_id,
+                              const int64_t mtype_id, const int64_t mview_id,
+                              PhaseLease* out) {
+    auto& r = BatchTokenRegistry::instance();
+    int32_t d_id = 0;
+    auto d = r.lineage_lookup(stale_id, &d_id);
+    if (!d) return;
+    std::unique_lock<std::mutex> operation_lk(d->operation_mu);
+    // Raced: the relative was consumed or evicted while this thread waited.
+    // No retry — stealing the NEW state would clobber factors the winner
+    // just produced; rebuilding costs the same analysis either way.
+    if (!r.maps_to(d_id, d)) return;
+    cudssMatrixType_t mtype;
+    cudssMatrixViewType_t mview;
+    if (!mtype_from_id(mtype_id, &mtype) || !mview_from_id(mview_id, &mview)) return;
+    if (d->device_id != device_id || d->dtype != get_cudss_data_type<T>() ||
+        d->mtype != mtype || d->mview != mview) return;
+    if (token_count != 1 && token_count != d->batch) return;
+    if (cudaStreamWaitEvent(stream, d->done, 0) != cudaSuccess) return;
+    if (cudssSetStream(d->handle, stream) != CUDSS_STATUS_SUCCESS) return;
+    out->entry = std::move(d);
+    out->operation_lk = std::move(operation_lk);
+    out->token_id = d_id;
 }
 
 template <ffi::DataType T>
@@ -335,20 +455,12 @@ static ffi::Error create_entry(
     e->dtype = get_cudss_data_type<T>();
     e->device_id = device_id;
 
-    switch (mtype_id) {
-        case 0: e->mtype = CUDSS_MTYPE_GENERAL; break;
-        case 1: e->mtype = CUDSS_MTYPE_SYMMETRIC; break;
-        case 2: e->mtype = CUDSS_MTYPE_HERMITIAN; break;
-        case 3: e->mtype = CUDSS_MTYPE_SPD; break;
-        case 4: e->mtype = CUDSS_MTYPE_HPD; break;
-        default: return ffi::Error::Internal(
+    if (!mtype_from_id(mtype_id, &e->mtype)) {
+        return ffi::Error::Internal(
             "spineax pbatch token: invalid mtype_id (0 general, 1 symmetric, 2 hermitian, 3 spd, 4 hpd)");
     }
-    switch (mview_id) {
-        case 0: e->mview = CUDSS_MVIEW_FULL; break;
-        case 1: e->mview = CUDSS_MVIEW_UPPER; break;
-        case 2: e->mview = CUDSS_MVIEW_LOWER; break;
-        default: return ffi::Error::Internal(
+    if (!mview_from_id(mview_id, &e->mview)) {
+        return ffi::Error::Internal(
             "spineax pbatch token: invalid mview_id (0 full, 1 upper, 2 lower)");
     }
 
@@ -462,7 +574,27 @@ static ffi::Error PbatchTokenNumeric(
         err.failure()) return err;
     auto& e = lease.entry;
 
-    const bool rebuilt = !e;
+    bool rebuilt = !e;
+    bool stole = false;
+    if (rebuilt && !kRefactorize) {
+        // Branch from a live relative's analysis before paying a rebuild
+        // (issue #27). The repoint doubles as the size + structure-
+        // fingerprint gate: on mismatch fall through to the rebuild path.
+        // Refactorize is excluded — its heal contract is fresh pivots from
+        // a fresh factorization, and a relative's pivot order came from
+        // DIFFERENT values.
+        PhaseLease steal;
+        try_lineage_steal<T>(stream, lease.token_id, token_in.element_count(),
+                             device_id, mtype_id, mview_id, &steal);
+        if (steal.entry &&
+            !batch_token_repoint<T>(steal.entry.get(), stream, offsets_buf,
+                                    columns_buf, fingerprint_buf,
+                                    csr_values_buf).failure()) {
+            lease = std::move(steal);  // e (reference) now sees the relative
+            rebuilt = false;
+            stole = true;
+        }
+    }
     if (rebuilt) {
         // Input state not resident: rebuild from this call's own buffers.
         // The old pivot order went with the old entry, so a refactorize
@@ -474,7 +606,7 @@ static ffi::Error PbatchTokenNumeric(
                                        reordering_id, memory_id, &e);
             err.failure()) return err;
         r.rebuilds.fetch_add(1);
-    } else {
+    } else if (!stole) {
         if (auto err = batch_token_repoint<T>(e.get(), stream, offsets_buf,
                                               columns_buf, fingerprint_buf,
                                               csr_values_buf); err.failure()) return err;
@@ -487,8 +619,10 @@ static ffi::Error PbatchTokenNumeric(
     CUDA_TOKEN_CHECK(cudaEventRecord(e->done, stream));
 
     // A numeric phase consumes its input state's name: the entry moves to a
-    // fresh id, so every id ever handed out names one immutable state.
+    // fresh id, so every id ever handed out names one immutable state. A
+    // stolen relative is consumed the same way (lease.token_id is ITS id).
     int32_t new_id = rebuilt ? r.insert(e) : r.rekey(lease.token_id, e);
+    if (stole) r.branches.fetch_add(1);
     return token_write_id(stream, token_out, new_id);
 }
 
@@ -816,6 +950,17 @@ NB_MODULE(pbatch_solve, m) {
     });
     m.def("token_rebuild_count", []() {
         return BatchTokenRegistry::instance().rebuilds.load();
+    });
+    m.def("token_branch_count", []() {
+        return BatchTokenRegistry::instance().branches.load();
+    });
+    m.def("token_lineage_stats", []() {
+        auto& r = BatchTokenRegistry::instance();
+        std::lock_guard<std::mutex> lk(r.mu);
+        nb::dict d;
+        d["lineage"] = r.lineage.size();
+        d["retired"] = r.retired.size();
+        return d;
     });
     m.def("nd_partition_tree_size", []() {
         return kNdPartitionTreeSize;

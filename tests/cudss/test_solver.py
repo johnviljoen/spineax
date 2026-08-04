@@ -1416,3 +1416,216 @@ def test_concurrent_refactors_branch_from_one_token():
     for scale, result in zip((2.0, 3.0), branches):
         assert _rel_err(scale * A, cudss.solve(result, b), b) < _TOL[jnp.float64]
     assert _rel_err(A, cudss.solve(token, b), b) < _TOL[jnp.float64]
+
+
+# issue #27: cheap analysis reuse when branching from one analyzed scope =======
+
+def test_issue27_tree_reuse(monkeypatch):
+    """Nardi's star (issue #27): many factorizations branching from ONE
+    analyzed scope pay the cuDSS analysis once. Each branch reuses a live
+    relative's analysis (branch_count rises) instead of self-heal re-analysis
+    (rebuild_count stays flat), and consumes the relative's id, so the
+    registry does not grow either."""
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "64")
+    values, offsets, columns, A = _sym_system(seed=40)
+    b = jnp.asarray(np.random.default_rng(41).standard_normal(A.shape[0]))
+
+    scope = cudss.analyze(values, offsets, columns)
+    scope.id.block_until_ready()
+    r0, br0 = cudss.rebuild_count(), cudss.branch_count()
+    size0 = cudss.registry_size()
+
+    # factorize + solve per branch: the splineax scoped-solver flow
+    for scale in (1.0, 2.0, 3.0, 4.0):
+        state = cudss.factorize(scope, scale * values)
+        assert _rel_err(scale * A, cudss.solve(state, b), b) < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0  # ZERO re-analysis
+    assert cudss.branch_count() == br0 + 3  # first consumes scope, rest branch
+    assert cudss.registry_size() == size0
+
+    # keeping every branch alive stays CORRECT: a superseded branch's solve
+    # self-heals to its own values (that rebuild is the price of genuinely
+    # interleaved liveness, never a wrong answer)
+    kept = [(s, cudss.factorize(scope, s * values)) for s in (5.0, 6.0)]
+    for scale, state in kept:
+        assert _rel_err(scale * A, cudss.solve(state, b), b) < _TOL[jnp.float64]
+
+
+def test_issue27_scoped_lineax_solver(monkeypatch):
+    """The issue's flow through the lineax adapter: analyze the operator once,
+    then N (factorize -> solve) rounds with fresh values; one analysis total."""
+    import lineax as lx
+    import jax.experimental.sparse as jsparse
+
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "64")
+    *_, A = _sym_system(n=40, seed=42)
+    sp = jsparse.BCSR.fromdense(jnp.asarray(A))
+    solver = cudss.CuDSS()
+    b = jnp.asarray(np.random.default_rng(43).standard_normal(A.shape[0]))
+
+    scope = solver.analyze(
+        cudss.CSROperator(sp.data, sp.indptr, sp.indices, lx.symmetric_tag))
+    scope.id.block_until_ready()
+    r0, br0 = cudss.rebuild_count(), cudss.branch_count()
+
+    for scale in (1.0, 0.5, 2.0):
+        operator = cudss.CSROperator(scale * sp.data, sp.indptr, sp.indices,
+                                     lx.symmetric_tag)
+        state = solver.factorize(scope, operator)
+        x = solver.solve(state, b)
+        assert _rel_err(scale * np.asarray(A), x, b) < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0
+    assert cudss.branch_count() == br0 + 2
+
+
+def test_issue27_branch_through_batch_doors(monkeypatch):
+    """Branching works for block-diagonal entries from both batch doors."""
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "64")
+    values, offsets, columns, A = _sym_system(seed=44)
+    n = A.shape[0]
+    b = jnp.asarray(np.random.default_rng(45).standard_normal(n))
+
+    # explicit door: (B, nnz) values
+    vals = jnp.stack([values, 2.0 * values])
+    scope = cudss.analyze(vals, offsets, columns)
+    scope.id.block_until_ready()
+    r0, br0 = cudss.rebuild_count(), cudss.branch_count()
+    first = cudss.factorize(scope, vals)
+    second = cudss.factorize(scope, 3.0 * vals)  # scope consumed -> branch
+    xs = cudss.solve(second, jnp.stack([b, b]))
+    assert _rel_err(3.0 * np.asarray(A), xs[0], b) < _TOL[jnp.float64]
+    assert _rel_err(6.0 * np.asarray(A), xs[1], b) < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0
+    assert cudss.branch_count() == br0 + 1
+    del first
+
+    # vmap door: B equal ids through the batched factorize
+    tokens = jax.vmap(lambda v: cudss.analyze(v, offsets, columns))(vals)
+    tokens.id.block_until_ready()
+    r1, br1 = cudss.rebuild_count(), cudss.branch_count()
+    t1 = jax.vmap(cudss.factorize)(tokens, vals)
+    t2 = jax.vmap(cudss.factorize)(tokens, 5.0 * vals)  # branch
+    xs = jax.vmap(cudss.solve)(t2, jnp.stack([b, b]))
+    assert _rel_err(5.0 * np.asarray(A), xs[0], b) < _TOL[jnp.float64]
+    assert _rel_err(10.0 * np.asarray(A), xs[1], b) < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r1
+    assert cudss.branch_count() == br1 + 1
+    del t1
+
+
+def test_issue27_evicted_lineage_falls_back(monkeypatch):
+    """When every relative of the scope's lineage has been evicted, branching
+    quietly degrades to the plain self-heal rebuild (correct, counted)."""
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "2")
+    values, offsets, columns, A = _sym_system(seed=46)
+    b = jnp.asarray(np.random.default_rng(47).standard_normal(A.shape[0]))
+
+    scope = cudss.analyze(values, offsets, columns)
+    state = cudss.factorize(scope, values)  # consumes scope (rekey)
+    state.id.block_until_ready()
+    for _ in range(3):  # push the lineage's only entry out of the tiny cache
+        cudss.analyze(values, offsets, columns).id.block_until_ready()
+    r0, br0 = cudss.rebuild_count(), cudss.branch_count()
+
+    branched = cudss.factorize(scope, 2.0 * values)
+    assert _rel_err(2.0 * np.asarray(A), cudss.solve(branched, b), b) \
+        < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0 + 1
+    assert cudss.branch_count() == br0
+
+
+def test_issue27_tampered_scope_falls_back(monkeypatch):
+    """A consumed scope whose structure leaves were tampered with must NOT
+    steal the relative's analysis (fingerprint gate): it falls back to the
+    plain heal path, exactly the pre-branching behavior for non-resident
+    tampered tokens, and the relative's own state stays intact."""
+    import dataclasses
+
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "64")
+    # diagonal + one (0, 2) entry; the tamper moves it to (0, 3) — a
+    # different but equally valid pattern with identical array sizes
+    n = 6
+    offsets = jnp.asarray([0, 2, 3, 4, 5, 6, 7], dtype=jnp.int32)
+    columns = jnp.asarray([0, 2, 1, 2, 3, 4, 5], dtype=jnp.int32)
+    columns_t = jnp.asarray([0, 3, 1, 2, 3, 4, 5], dtype=jnp.int32)
+    values = jnp.asarray([4.0, 0.5, 4.0, 4.0, 4.0, 4.0, 4.0])
+    rows = np.repeat(np.arange(n), np.diff(np.asarray(offsets)))
+
+    def dense(cols):
+        U = np.zeros((n, n))
+        U[rows, np.asarray(cols)] = np.asarray(values)
+        return U + U.T - np.diag(np.diag(U))
+
+    b = jnp.asarray(np.random.default_rng(48).standard_normal(n))
+    scope = cudss.analyze(values, offsets, columns)
+    state = cudss.factorize(scope, values)  # consumes scope
+    state.id.block_until_ready()
+    r0, br0 = cudss.rebuild_count(), cudss.branch_count()
+
+    tampered = dataclasses.replace(scope, columns=columns_t)
+    branched = cudss.factorize(tampered, values)
+    assert _rel_err(dense(columns_t), cudss.solve(branched, b), b) \
+        < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0 + 1  # heal path, not a branch
+    assert cudss.branch_count() == br0
+    # the relative was not stolen: still resident, no heal for its solve
+    assert _rel_err(dense(columns), cudss.solve(state, b), b) \
+        < _TOL[jnp.float64]
+    assert cudss.rebuild_count() == r0 + 1
+
+
+def test_issue27_grad_through_branched_state(monkeypatch):
+    """Autodiff must not care how an entry was born: gradients through a
+    solve whose factorization branched off a consumed scope match dense."""
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "64")
+    n = 20
+    values, offsets, columns, _ = _sym_system(n=n, seed=49)
+    b = jnp.asarray(np.random.default_rng(50).standard_normal(n))
+    rows = jnp.repeat(jnp.arange(n), jnp.diff(offsets))
+
+    scope = cudss.analyze(values, offsets, columns, mtype_id=1, mview_id=1)
+    consumed = cudss.factorize(scope, values)  # every loss() call branches
+    consumed.id.block_until_ready()
+
+    def loss(vals, b):
+        t = cudss.factorize(scope, vals)
+        return jnp.sum(cudss.solve(t, b) ** 2)
+
+    gv, gb = jax.jit(jax.grad(loss, argnums=(0, 1)))(values, b)
+
+    def dense_loss(vals, b):
+        U = jnp.zeros((n, n)).at[rows, columns].set(vals)
+        A = U + U.T - jnp.diag(jnp.diag(U))
+        return jnp.sum(jnp.linalg.solve(A, b) ** 2)
+
+    gv_d, gb_d = jax.grad(dense_loss, argnums=(0, 1))(values, b)
+    np.testing.assert_allclose(np.asarray(gv), np.asarray(gv_d),
+                               rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(gb), np.asarray(gb_d),
+                               rtol=1e-9, atol=1e-9)
+
+
+def test_issue27_lineage_maps_bounded(monkeypatch):
+    """The lineage bookkeeping must not grow with use: origin->current stays
+    within the LRU capacity and the retired-id map within its FIFO cap."""
+    from spineax.cudss.solver import _ps
+
+    _require_gpu()
+    monkeypatch.setenv("SPINEAX_FACTOR_CACHE", "8")
+    values, offsets, columns, A = _sym_system(seed=51)
+
+    for _ in range(30):  # analyze -> factorize -> branch -> drop, repeatedly
+        scope = cudss.analyze(values, offsets, columns)
+        cudss.factorize(scope, values).id.block_until_ready()
+        cudss.factorize(scope, 2.0 * values).id.block_until_ready()
+
+    stats = _ps.token_lineage_stats()
+    assert stats["lineage"] <= cudss.cache_capacity()
+    assert stats["retired"] <= 4096
+    assert cudss.registry_size() <= cudss.cache_capacity()
