@@ -10,7 +10,7 @@ I built this repo as part of a project to GPU-batch solve many IPOPT optimizatio
 
 ## cuDSS
 
-I expose ***most*** features of cuDSS (as of 0.8.0) to JAX with ***zero-copy arrays*** and ***full FFI jit/vmap integration*** including custom batching functionality to expose more information than cuDSS currently supports.
+I expose ***most*** features of cuDSS to JAX with ***zero-copy arrays*** and ***full FFI jit/vmap integration*** including custom batching functionality to expose more information than cuDSS currently supports.
 
 This currently supports:
 - ***zero-copies between JAX and cuDSS***
@@ -27,6 +27,7 @@ We have also added a ***new Lineax-based API***, which is now the recommended me
 Requirements:
 * An NVIDIA GPU of **Turing generation (compute capability 7.5) or newer**
 * **CUDA 13**
+* **cuDSS 1.0 or newer**
 * **Python 3.12 or newer**
 * Linux x86-64 only
 

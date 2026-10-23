@@ -116,7 +116,7 @@ find_library(ENV_CUBLAS_PATH
 )
 
 find_library(ENV_CUDSS_PATH
-  NAMES cudss libcudss libcudss.so libcudss.so.0 libcudss.so.13 libcudss.so.12
+  NAMES cudss libcudss libcudss.so libcudss.so.1
   HINTS ${ENV_NVIDIA_LIB_DIRS}
   NO_DEFAULT_PATH
   REQUIRED

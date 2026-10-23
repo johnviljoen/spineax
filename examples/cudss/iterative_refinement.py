@@ -27,6 +27,7 @@ step buys ~10 orders of magnitude in both residual and solution.
 
 import numpy as np
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from spineax import cudss
@@ -83,18 +84,24 @@ def test_refinement_recovers_digits():
         return np.linalg.norm(np.asarray(x) - x_true) / np.linalg.norm(x_true)
 
     def res(x):
-        return np.linalg.norm(K @ np.asarray(x) - np.asarray(b)) / np.linalg.norm(np.asarray(b))
+        return np.linalg.norm(K @ np.asarray(x) - np.asarray(b)) / np.linalg.norm(
+            np.asarray(b)
+        )
 
-    print(f"\n  {'nsteps':>6}  {'fwd err':>11}  {'residual':>11}"
-          f"  {'batch fwd':>11}  {'batch resid':>11}")
+    print(
+        f"\n  {'nsteps':>6}  {'fwd err':>11}  {'residual':>11}"
+        f"  {'batch fwd':>11}  {'batch resid':>11}"
+    )
     resids = {}
     for nsteps in range(4):
         x = cudss.solve(token, b, ir_nsteps=nsteps)
         xb = cudss.solve(btoken, b_b, ir_nsteps=nsteps)
         resids[nsteps] = res(x)
-        print(f"  {nsteps:>6}  {fwd(x):>11.2e}  {res(x):>11.2e}"
-              f"  {max(fwd(xb[i]) for i in range(batch)):>11.2e}"
-              f"  {max(res(xb[i]) for i in range(batch)):>11.2e}")
+        print(
+            f"  {nsteps:>6}  {fwd(x):>11.2e}  {res(x):>11.2e}"
+            f"  {max(fwd(xb[i]) for i in range(batch)):>11.2e}"
+            f"  {max(res(xb[i]) for i in range(batch)):>11.2e}"
+        )
 
     assert resids[1] < resids[0] * 1e-6, "one IR step should recover ~10 digits"
     cudss.release(token)
@@ -155,8 +162,10 @@ def test_traced_ir_nsteps_in_jit():
         return float(jnp.linalg.norm(Kj @ x - b) / jnp.linalg.norm(b))
 
     for k in (0, 1, 3):
-        print(f"  ir_nsteps={k}  |  relative residual = "
-              f"{res(solve_k(token, b, jnp.int32(k))):.2e}")
+        print(
+            f"  ir_nsteps={k}  |  relative residual = "
+            f"{res(solve_k(token, b, jnp.int32(k))):.2e}"
+        )
     assert solve_k._cache_size() == 1, "traced k must not retrace"
     print(f"  jit cache size: {solve_k._cache_size()} (one trace for all k)")
 

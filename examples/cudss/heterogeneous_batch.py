@@ -17,6 +17,7 @@ block-diagonal sparse system", and nothing requires the blocks to be alike:
 
 import numpy as np
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from spineax import cudss
@@ -37,7 +38,9 @@ def dense_of_upper(values, offsets, columns, n):
 def tridiag_upper(n):
     """Tridiagonal SPD: diag 4, superdiag 1. Upper nnz = 2n - 1."""
     offsets = np.concatenate([np.arange(0, 2 * (n - 1), 2), [2 * n - 2, 2 * n - 1]])
-    columns = np.concatenate([np.stack([np.arange(n - 1), np.arange(1, n)], 1).ravel(), [n - 1]])
+    columns = np.concatenate(
+        [np.stack([np.arange(n - 1), np.arange(1, n)], 1).ravel(), [n - 1]]
+    )
     values = np.concatenate([np.tile([4.0, 1.0], n - 1), [4.0]])
     return values, offsets, columns
 
@@ -94,7 +97,9 @@ def block_diag_csr(blocks):
     bounds = np.concatenate([[0], np.cumsum(ns)])
     values = np.concatenate([b[0] for b in blocks])
     columns = np.concatenate([np.asarray(b[2]) + lo for b, lo in zip(blocks, bounds)])
-    offsets = np.concatenate([[0], np.cumsum(np.concatenate([np.diff(b[1]) for b in blocks]))])
+    offsets = np.concatenate(
+        [[0], np.cumsum(np.concatenate([np.diff(b[1]) for b in blocks]))]
+    )
     return values, offsets, columns, bounds
 
 
@@ -108,8 +113,13 @@ def test_heterogeneous_sizes():
     values, offsets, columns, bounds = block_diag_csr(blocks)
     b = rng.standard_normal(bounds[-1])
 
-    token = cudss.analyze(jnp.asarray(values), jnp.asarray(offsets, jnp.int32),
-                          jnp.asarray(columns, jnp.int32), mtype_id=1, mview_id=1)
+    token = cudss.analyze(
+        jnp.asarray(values),
+        jnp.asarray(offsets, jnp.int32),
+        jnp.asarray(columns, jnp.int32),
+        mtype_id=1,
+        mview_id=1,
+    )
     token = cudss.factorize(token, jnp.asarray(values))
     x = np.asarray(cudss.solve(token, jnp.asarray(b)))
 

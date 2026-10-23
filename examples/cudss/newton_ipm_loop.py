@@ -16,6 +16,7 @@ the expected (n_x, n_c) — the standard IPM inertia-correction pattern.
 """
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -36,7 +37,9 @@ def make_kkt_batch(n_x=60, n_c=20, batch_size=16, seed=0):
         Q, _ = np.linalg.qr(rng.standard_normal((n_x, n_x)))
         if i % 4 == 0:
             # rank-deficient H: needs rho > 0 for correct inertia
-            eigs = np.concatenate([np.zeros(n_x // 2), np.linspace(1, 5, n_x - n_x // 2)])
+            eigs = np.concatenate(
+                [np.zeros(n_x // 2), np.linspace(1, 5, n_x - n_x // 2)]
+            )
         else:
             eigs = np.linspace(0.5, 5.0, n_x)
         Hs.append(Q @ np.diag(eigs) @ Q.T)
@@ -54,15 +57,16 @@ def make_kkt_batch(n_x=60, n_c=20, batch_size=16, seed=0):
     mask = np.triu(np.ones((n, n), dtype=bool))
     columns = jnp.asarray(np.nonzero(mask)[1].astype(np.int32))
     offsets = jnp.asarray(
-        np.concatenate([[0], np.cumsum(mask.sum(axis=1))]).astype(np.int32))
+        np.concatenate([[0], np.cumsum(mask.sum(axis=1))]).astype(np.int32)
+    )
 
     K0 = np.stack([np.triu(dense_kkt(i, 0.0)) for i in range(batch_size)])
     Keye = np.zeros((n, n))
     Keye[:n_x, :n_x] = np.eye(n_x)
     Keye = np.triu(Keye)
 
-    K0_vals = jnp.asarray(K0[:, mask])            # (B, nnz) at rho = 0
-    eye_vals = jnp.asarray(Keye[mask])            # (nnz,) the d/drho direction
+    K0_vals = jnp.asarray(K0[:, mask])  # (B, nnz) at rho = 0
+    eye_vals = jnp.asarray(Keye[mask])  # (nnz,) the d/drho direction
 
     def values(rho):  # rho: (B,) -> (B, nnz)
         return K0_vals + rho[:, None] * eye_vals[None, :]
@@ -87,14 +91,18 @@ def main():
     factorize_j = jax.jit(cudss.factorize)
     solve_j = jax.jit(cudss.solve)
 
-    print(f"batch of {batch_size} KKT systems, n = {n_x + n_c}, expected inertia ({n_x}, {n_c})")
+    print(
+        f"batch of {batch_size} KKT systems, n = {n_x + n_c}, expected inertia ({n_x}, {n_c})"
+    )
     for it in range(4):
         # 3. per-block inertia BEFORE solving (the one data door)
         inertia = cudss.inertia(cudss.query(token), batch_size=batch_size)
         wrong = jnp.any(inertia != expected[None, :], axis=1)
         n_wrong = int(wrong.sum())
-        print(f"iter {it}: {n_wrong}/{batch_size} blocks with wrong inertia"
-              f"{'' if n_wrong == 0 else ' -> bumping rho and refactorizing'}")
+        print(
+            f"iter {it}: {n_wrong}/{batch_size} blocks with wrong inertia"
+            f"{'' if n_wrong == 0 else ' -> bumping rho and refactorizing'}"
+        )
 
         if n_wrong > 0:
             # 4. inertia correction: bump rho ONLY on the offending blocks.
@@ -111,9 +119,11 @@ def main():
 
         # 5. inertia is right everywhere: ONE block solve for the whole batch
         x = solve_j(token, b)
-        print(f"        solved; ||x|| per block in "
-              f"[{float(jnp.linalg.norm(x, axis=1).min()):.3f}, "
-              f"{float(jnp.linalg.norm(x, axis=1).max()):.3f}]")
+        print(
+            f"        solved; ||x|| per block in "
+            f"[{float(jnp.linalg.norm(x, axis=1).min()):.3f}, "
+            f"{float(jnp.linalg.norm(x, axis=1).max()):.3f}]"
+        )
         break
 
     # The same refactorize-or-not decision as traced control flow: a token is
@@ -128,10 +138,12 @@ def main():
         )
         return cudss.solve(token, b), token
 
-    x2, token = step(token, vals, b, False)   # skip branch: reuse factors
-    x3, token = step(token, vals, b, True)    # take branch: fresh refactorization
-    print(f"lax.cond step: skip-vs-take solution diff {float(jnp.abs(x2 - x3).max()):.2e} "
-          "(same values -> same solution)")
+    x2, token = step(token, vals, b, False)  # skip branch: reuse factors
+    x3, token = step(token, vals, b, True)  # take branch: fresh refactorization
+    print(
+        f"lax.cond step: skip-vs-take solution diff {float(jnp.abs(x2 - x3).max()):.2e} "
+        "(same values -> same solution)"
+    )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ requires = [
     # and compiles against cudss.h + the CUDA runtime headers. These are ignored
     # under --no-build-isolation (the build then uses the active environment).
     "jax[cuda13]>=0.8.0",
-    "nvidia-cudss-cu13>=0.8.0",
+    "nvidia-cudss-cu13>=1.0.0",
     "nvidia-cusparse>=12.6.2.49",
 ]
 build-backend = "scikit_build_core.build"
@@ -29,7 +29,7 @@ authors = [
 # wheel by CUDA major.
 dependencies = [
     "jax[cuda13]>=0.8.0",       # brings jaxlib (XLA/FFI) + nvidia-cuda-runtime-cu13
-    "nvidia-cudss-cu13>=0.8.0", # the cuDSS runtime (libcudss.so.0)
+    "nvidia-cudss-cu13>=1.0.0",
     "nvidia-cusparse>=12.6.2.49", # CSR transposes for general-matrix adjoints
     "jaxtyping",
     "equinox",
@@ -41,7 +41,16 @@ dev = [
     "nanobind",
     "ninja",
     "pytest",
+    "ruff",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+# Imports follow jax configuration or module sections; callbacks use lambdas.
+ignore = ["E402", "E731"]
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -77,9 +86,9 @@ manylinux-x86_64-image = "manylinux_2_28"
 # Reproduce the repo's proven local build (see README): CUDA headers/libs and the
 # XLA FFI headers come from the pip wheels, so install them and build without
 # isolation rather than pulling the whole jax CUDA stack into an isolated env.
-before-build = "pip install 'scikit-build-core>=0.5' nanobind 'jax[cuda13]>=0.8.0' nvidia-cudss-cu13 nvidia-cusparse"
+before-build = "pip install 'scikit-build-core>=0.5' nanobind 'jax[cuda13]>=0.8.0' 'nvidia-cudss-cu13>=1.0.0' nvidia-cusparse"
 build-frontend = { name = "pip", args = ["--no-build-isolation"] }
 # Do NOT vendor the CUDA/cuDSS runtime into the wheel — it is provided by the
 # nvidia-cudss-cu13 / jax[cuda13] dependency wheels and found via the
 # $ORIGIN/../nvidia/cu13/lib RPATH. auditwheel still re-tags to manylinux_2_28.
-repair-wheel-command = "auditwheel repair --exclude libcudss.so.0 --exclude libcudart.so.13 --exclude libcublas.so.13 --exclude libcusparse.so.13 --exclude libcusparse.so.12 -w {dest_dir} {wheel}"
+repair-wheel-command = "auditwheel repair --exclude libcudss.so.1 --exclude libcudart.so.13 --exclude libcublas.so.13 --exclude libcusparse.so.13 --exclude libcusparse.so.12 -w {dest_dir} {wheel}"

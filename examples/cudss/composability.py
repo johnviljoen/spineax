@@ -7,6 +7,7 @@ block-diagonal system — a (2, 2, 2) batch IS the flattened 8-batch — and
 autodiff-added axes peel through the same rules, so grad-of-grad under vmap
 is just more solves against the same factors.
 """
+
 import jax
 import jax.numpy as jnp
 import jax.experimental.sparse as jsparse
@@ -14,14 +15,15 @@ from spineax import cudss
 
 
 def test_composability():
-
-    M1 = jnp.array([
-        [4., 0., 1., 0., 0.],
-        [0., 3., 2., 0., 0.],
-        [0., 0., 5., 0., 1.],
-        [0., 0., 0., 1., 0.],
-        [0., 0., 0., 0., 2.],
-    ])
+    M1 = jnp.array(
+        [
+            [4.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 3.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 5.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 2.0],
+        ]
+    )
     b1 = jnp.array([7.0, 12.0, 25.0, 4.0, 13.0])
 
     m1 = M1 + M1.T - jnp.diag(M1) * jnp.eye(M1.shape[0])
@@ -47,8 +49,12 @@ def test_composability():
     # (s*A)^-1 b = A^-1 b / s: the reference needs no per-block solve
     true_x = true_x1 / scales[..., None]
 
-    print(f"difference between cudss and cusolver in single solve: {jnp.linalg.norm(x1 - true_x1)}")
-    print(f"difference between cudss and cusolver in (2,2,2) nested-vmap solve: {jnp.linalg.norm(x - true_x)}")
+    print(
+        f"difference between cudss and cusolver in single solve: {jnp.linalg.norm(x1 - true_x1)}"
+    )
+    print(
+        f"difference between cudss and cusolver in (2,2,2) nested-vmap solve: {jnp.linalg.norm(x - true_x)}"
+    )
 
     assert jnp.allclose(x1, true_x1, rtol=1e-5, atol=1e-5)
     assert jnp.allclose(x, true_x, rtol=1e-4, atol=1e-4)
@@ -64,7 +70,9 @@ def test_composability():
     d2 = jax.jit(jax.vmap(jax.grad(jax.grad(loss))))(s)
     d2_true = 2.0 * jnp.sum(true_x1) / s**3
 
-    print(f"vmap(grad(grad(loss))) max err vs analytic: {jnp.max(jnp.abs(d2 - d2_true))}")
+    print(
+        f"vmap(grad(grad(loss))) max err vs analytic: {jnp.max(jnp.abs(d2 - d2_true))}"
+    )
     assert jnp.allclose(d2, d2_true, rtol=1e-3, atol=1e-3)
 
 

@@ -6,6 +6,7 @@ transparently rebuilds its factors from the token's own CSR arrays — every
 phase, ``query`` included. ``rebuild_count()`` counts the heals — a rising
 count means SPINEAX_FACTOR_CACHE is too small.
 """
+
 import jax
 import jax.numpy as jnp
 import jax.experimental.sparse as jsparse

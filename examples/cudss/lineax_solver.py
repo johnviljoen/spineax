@@ -15,6 +15,7 @@ wrap) give two interoperating styles:
   IPM/Newton loops where the analyze/factorize/refactorize boundaries are
   yours, plus ``query`` for every cuDSS data item (inertia included).
 """
+
 import jax
 import jax.numpy as jnp
 import jax.experimental.sparse as jsparse
@@ -27,7 +28,6 @@ jax.config.update("jax_enable_x64", True)
 
 
 def test_lineax_solver():
-
     key = jax.random.PRNGKey(0)
     n = 50
     # banded symmetric positive definite test matrix, full CSR pattern
@@ -43,9 +43,9 @@ def test_lineax_solver():
 
     # explicit phase style: each cuDSS phase is a method call, and the
     # analyze/factorize boundary is yours
-    token = solver.analyze(operator)                # ANALYSIS (once)
-    token = solver.factorize(token, operator)       # FACTORIZATION
-    x = solver.solve(token, b)                      # SOLVE
+    token = solver.analyze(operator)  # ANALYSIS (once)
+    token = solver.factorize(token, operator)  # FACTORIZATION
+    x = solver.solve(token, b)  # SOLVE
     err = jnp.max(jnp.abs(operator.mv(x) - b))
     print(f"explicit phases:           max |Ax-b| = {err:.2e}")
     assert err < 1e-12
@@ -55,8 +55,10 @@ def test_lineax_solver():
     # before paying for a solve
     data = solver.query(token)
     inr = cudss.inertia(data)
-    print(f"query -> inertia:          [pos, neg] = {inr} "
-          f"(lu_nnz {int(data['lu_nnz'][0])}, npivots {int(data['npivots'][0])})")
+    print(
+        f"query -> inertia:          [pos, neg] = {inr} "
+        f"(lu_nnz {int(data['lu_nnz'][0])}, npivots {int(data['npivots'][0])})"
+    )
     assert inr[0] == n and inr[1] == 0  # positive definite
 
     # one-shot lineax style: lx.linear_solve runs init (analyze+factorize)
@@ -69,8 +71,10 @@ def test_lineax_solver():
     sol = lx.linear_solve(operator, b, solver)
     err = jnp.max(jnp.abs(operator.mv(sol.value) - b))
     cudss.release(sol.state)
-    print(f"one-shot linear_solve:     max |Ax-b| = {err:.2e} "
-          f"(entry released, registry: {cudss.registry_size()})")
+    print(
+        f"one-shot linear_solve:     max |Ax-b| = {err:.2e} "
+        f"(entry released, registry: {cudss.registry_size()})"
+    )
     assert err < 1e-12
 
     # the styles interoperate: the factorized token IS lineax's state, so
@@ -101,7 +105,7 @@ def test_lineax_solver():
     def loss(values):
         op = CSROperator(values, sp.indptr, sp.indices, lx.symmetric_tag)
         x = lx.linear_solve(op, b, solver).value
-        return jnp.sum(x ** 2)
+        return jnp.sum(x**2)
 
     grad_sparse = jax.grad(loss)(sp.data)
 
