@@ -11,6 +11,7 @@
 #include <map>
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <list>
 #include <string>
 
@@ -239,6 +240,28 @@ struct PhaseLease {
     std::unique_lock<std::mutex> operation_lk;
     int32_t token_id = 0;
 };
+
+// SPINEAX_DEBUG_STALE=1: print every stale-id event (rebuild/branch) with the
+// op kind and system size to stderr — attribution tool for rebuild storms.
+static bool stale_log_enabled() {
+    static const bool on = std::getenv("SPINEAX_DEBUG_STALE") != nullptr;
+    return on;
+}
+
+static void stale_log(const char* op, int32_t id, size_t elems) {
+    if (stale_log_enabled())
+        fprintf(stderr, "spineax-stale: %s id=%d elems=%zu\n", op, id, elems);
+}
+
+// SPINEAX_DEBUG_STALE=1 also prints EVERY phase call (hit or not) with its
+// input/output ids in host launch order, so each stale event can be
+// attributed to the exact op that consumed the id first.
+static void op_log(const char* op, int32_t in_id, int32_t out_id,
+                   const char* mode, size_t elems) {
+    if (stale_log_enabled())
+        fprintf(stderr, "spineax-op: %s in=%d out=%d mode=%s elems=%zu\n",
+                op, in_id, out_id, mode, elems);
+}
 
 static bool mtype_from_id(int64_t mtype_id, cudssMatrixType_t* out) {
     switch (mtype_id) {
@@ -549,6 +572,7 @@ static ffi::Error PbatchTokenAnalyze(
         err.failure()) return err;
     CUDA_TOKEN_CHECK(cudaEventRecord(e->done, stream));
     int32_t id = BatchTokenRegistry::instance().insert(std::move(e));
+    op_log("analyze", 0, id, "mint", csr_values_buf.element_count());
     return token_write_id(stream, token_buf, id);
 }
 
@@ -573,16 +597,18 @@ static ffi::Error PbatchTokenNumeric(
     if (auto err = token_begin_phase<T>(stream, token_in, device_id, &lease);
         err.failure()) return err;
     auto& e = lease.entry;
+    const int32_t in_id = lease.token_id;  // survives a lineage steal below
 
     bool rebuilt = !e;
     bool stole = false;
-    if (rebuilt && !kRefactorize) {
+    if (rebuilt) {
         // Branch from a live relative's analysis before paying a rebuild
         // (issue #27). The repoint doubles as the size + structure-
         // fingerprint gate: on mismatch fall through to the rebuild path.
-        // Refactorize is excluded — its heal contract is fresh pivots from
-        // a fresh factorization, and a relative's pivot order came from
-        // DIFFERENT values.
+        // A stolen REFACTORIZE escalates to a full factorization below —
+        // its heal contract is fresh pivots, and the relative's pivot order
+        // came from DIFFERENT values; only the (value-independent) analysis
+        // is reused, exactly as the rebuild path would refactorize.
         PhaseLease steal;
         try_lineage_steal<T>(stream, lease.token_id, token_in.element_count(),
                              device_id, mtype_id, mview_id, &steal);
@@ -606,14 +632,19 @@ static ffi::Error PbatchTokenNumeric(
                                        reordering_id, memory_id, &e);
             err.failure()) return err;
         r.rebuilds.fetch_add(1);
+        stale_log(kRefactorize ? "rebuild-refactorize" : "rebuild-factorize",
+                  lease.token_id, csr_values_buf.element_count());
     } else if (!stole) {
         if (auto err = batch_token_repoint<T>(e.get(), stream, offsets_buf,
                                               columns_buf, fingerprint_buf,
                                               csr_values_buf); err.failure()) return err;
     }
+    if (stole)
+        stale_log(kRefactorize ? "branch-refactorize" : "branch-factorize",
+                  lease.token_id, csr_values_buf.element_count());
     CUDSS_TOKEN_CHECK(cudssExecute(e->handle,
-        (kRefactorize && !rebuilt) ? CUDSS_PHASE_REFACTORIZATION
-                                   : CUDSS_PHASE_FACTORIZATION,
+        (kRefactorize && !rebuilt && !stole) ? CUDSS_PHASE_REFACTORIZATION
+                                             : CUDSS_PHASE_FACTORIZATION,
         e->config, e->data, e->A, e->x_dummy, e->b_dummy),
         "cudssExecute factorization");
     CUDA_TOKEN_CHECK(cudaEventRecord(e->done, stream));
@@ -623,6 +654,9 @@ static ffi::Error PbatchTokenNumeric(
     // stolen relative is consumed the same way (lease.token_id is ITS id).
     int32_t new_id = rebuilt ? r.insert(e) : r.rekey(lease.token_id, e);
     if (stole) r.branches.fetch_add(1);
+    op_log(kRefactorize ? "refactorize" : "factorize", in_id, new_id,
+           rebuilt ? "rebuild" : (stole ? "branch" : "hit"),
+           csr_values_buf.element_count());
     return token_write_id(stream, token_out, new_id);
 }
 
@@ -662,8 +696,14 @@ static ffi::Error PbatchTokenSolve(
             "cudssExecute factorization (rebuild)");
         auto& r = BatchTokenRegistry::instance();
         r.rebuilds.fetch_add(1);
+        stale_log("rebuild-solve", lease.token_id,
+                  csr_values_buf.element_count());
         r.insert(e, lease.token_id);
+        op_log("solve", lease.token_id, lease.token_id, "rebuild",
+               csr_values_buf.element_count());
     } else {
+        op_log("solve", lease.token_id, lease.token_id, "hit",
+               csr_values_buf.element_count());
         // SOLVE never reads A's values (spineax runs cuDSS-internal IR
         // permanently OFF; refinement is JAX-side in _refined_solve), but
         // repointing at this call's live buffers keeps every path
@@ -751,8 +791,14 @@ static ffi::Error PbatchTokenQuery(
             "cudssExecute factorization (rebuild)");
         auto& r = BatchTokenRegistry::instance();
         r.rebuilds.fetch_add(1);
+        stale_log("rebuild-query", lease.token_id,
+                  csr_values_buf.element_count());
         r.insert(e, lease.token_id);
+        op_log("query", lease.token_id, lease.token_id, "rebuild",
+               csr_values_buf.element_count());
     } else {
+        op_log("query", lease.token_id, lease.token_id, "hit",
+               csr_values_buf.element_count());
         // repoint = size + structure-fingerprint validation (query reads no
         // buffers itself, but should reject tampered tokens like every phase)
         if (auto err = batch_token_repoint<T>(e.get(), stream, offsets_buf,

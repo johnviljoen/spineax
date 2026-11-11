@@ -369,10 +369,14 @@ def _make_numeric(suffix, refactor, cfg):
         vals = csr_values if vb else jnp.broadcast_to(
             csr_values, (axis_size,) + csr_values.shape)
         # Collapse one axis and recurse (see the analyze rule): the batched
-        # ids are equal copies of the one block entry, so the first id plus
-        # the expanded pattern describe the whole level.
+        # ids describe the one block entry. They are normally equal copies,
+        # but batched control flow (vmapped while_loop masking) can leave
+        # lanes one generation behind; ids mint monotonically, so the max
+        # lane is the entry's newest state — and under the masked-data
+        # contract its factors are correct for every lane.
         offs_bd, cols_bd, _ = _expand_structure(offsets, columns, axis_size)
-        out_id = numeric_id(token_id[0], offs_bd, cols_bd, vals.reshape(-1))
+        out_id = numeric_id(token_id.max(axis=0), offs_bd, cols_bd,
+                            vals.reshape(-1))
         return jnp.broadcast_to(out_id, (axis_size,) + out_id.shape), True
 
     return numeric_id
@@ -399,13 +403,16 @@ def _make_solve(suffix, cfg):
             # unbatched token: the batch axis is just more rhs columns
             return solve_id(token_id, offsets, columns, values, b), True
         # batched ids (one block entry): flatten the batch axis into the ONE
-        # block-diagonal system of dimension B*n and solve it single-style
+        # block-diagonal system of dimension B*n and solve it single-style.
+        # max over lanes: see the numeric rule — control-flow masking can
+        # leave lanes on a superseded generation of the same entry.
         offs_bd, cols_bd, _ = _expand_structure(offsets, columns, axis_size)
         vals = values if vb else jnp.broadcast_to(
             values, (axis_size,) + values.shape)
         b2 = jnp.moveaxis(b, 0, -2)  # (B, ..., n) -> (..., B, n)
         bf = b2.reshape(b2.shape[:-2] + (-1,))
-        out = solve_id(token_id[0], offs_bd, cols_bd, vals.reshape(-1), bf)
+        out = solve_id(token_id.max(axis=0), offs_bd, cols_bd,
+                       vals.reshape(-1), bf)
         return jnp.moveaxis(out.reshape(b2.shape), -2, 0), True
 
     return solve_id
@@ -904,7 +911,7 @@ def _make_query(suffix, dtype, n, tree, cfg):
             values, (axis_size,) + values.shape)
         offs_bd, cols_bd, _ = _expand_structure(offsets, columns, axis_size)
         outs = _make_query(suffix, dtype, axis_size * n, tree, cfg)(
-            token_id[0], offs_bd, cols_bd, vals.reshape(-1))
+            token_id.max(axis=0), offs_bd, cols_bd, vals.reshape(-1))
         batched = []
         for field, a in zip(_QUERY_FIELDS, outs):
             if field in _QUERY_SPLIT_FIELDS:
@@ -982,9 +989,11 @@ def rebuild_count() -> int:
 
 
 def branch_count() -> int:
-    """Times ``factorize`` of a consumed id reused a live relative's analysis
-    instead of rebuilding (issue #27 tree/star reuse). Branches are the
-    feature working — they do NOT count in ``rebuild_count()``."""
+    """Times ``factorize``/``refactorize`` of a consumed id reused a live
+    relative's analysis instead of rebuilding (issue #27 tree/star reuse). A
+    stolen refactorize runs a FULL factorization (fresh pivots) on the reused
+    analysis. Branches are the feature working — they do NOT count in
+    ``rebuild_count()``."""
     return int(_ps.token_branch_count())
 
 
